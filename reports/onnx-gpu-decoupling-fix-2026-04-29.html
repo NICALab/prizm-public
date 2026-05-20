@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ONNX GPU Decoupling Fix Report - 2026-04-29</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 2rem auto;
+      max-width: 960px;
+      line-height: 1.5;
+      color: #222;
+    }
+    h1, h2 { color: #0f3d5e; }
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      background: #f5f7fa;
+      padding: 1rem;
+      overflow-x: auto;
+      border: 1px solid #d8dee4;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid #d8dee4;
+      padding: 0.6rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef3f8; }
+  </style>
+</head>
+<body>
+  <h1>ONNX GPU Decoupling Fix Report</h1>
+  <p><strong>Date:</strong> 2026-04-29</p>
+  <p><strong>Repository:</strong> <code>/home/josh/workspace/prizm-public-2/prizm-public</code></p>
+
+  <h2>Objective</h2>
+  <p>Apply the ONNX GPU decoupling fix to this second repository copy so ONNX Runtime GPU selection no longer depends on PyTorch CUDA visibility.</p>
+
+  <h2>Setup / Environment</h2>
+  <table>
+    <tr><th>Item</th><th>Value</th></tr>
+    <tr><td>Working directory</td><td><code>/home/josh/workspace/prizm-public-2/prizm-public</code></td></tr>
+    <tr><td>Shell</td><td><code>bash</code></td></tr>
+    <tr><td>Date</td><td>2026-04-29</td></tr>
+    <tr><td>Timezone</td><td>Asia/Seoul</td></tr>
+    <tr><td>Repo status at start</td><td>Clean working tree</td></tr>
+  </table>
+
+  <h2>Files Changed</h2>
+  <ul>
+    <li><code>src/prizm_napari/infer.py</code></li>
+    <li><code>src/prizm_napari/batch_segmentation_core.py</code></li>
+    <li><code>reports/onnx-gpu-decoupling-fix-2026-04-29.html</code></li>
+    <li><code>reports/master-summary.html</code></li>
+  </ul>
+
+  <h2>Commands Run</h2>
+  <pre>pwd
+git status --short
+rg -n "if self\.device == \"cuda\"|CUDAExecutionProvider|CPUExecutionProvider|ONNX backend ready on CPU fallback|onnx_available_providers|onnx_requested_providers" src/prizm_napari/infer.py src/prizm_napari/batch_segmentation_core.py
+ls -la
+sed -n '60,340p' src/prizm_napari/infer.py
+sed -n '372,390p' src/prizm_napari/batch_segmentation_core.py
+python -m py_compile src/prizm_napari/infer.py src/prizm_napari/batch_segmentation_core.py
+git diff -- src/prizm_napari/infer.py src/prizm_napari/batch_segmentation_core.py
+PYTHONPATH=src python - <<'PY'
+  # mocked validation: PyTorch CUDA unavailable, ONNX Runtime CUDA available
+PY
+PYTHONPATH=src python - <<'PY'
+  # mocked validation: CPU-only ONNX Runtime
+PY
+rm -rf src/model/__pycache__ src/prizm_napari/__pycache__
+mkdir -p reports
+nl -ba src/prizm_napari/infer.py | sed -n '70,245p'
+nl -ba src/prizm_napari/batch_segmentation_core.py | sed -n '374,390p'
+git diff --check
+git status --short</pre>
+
+  <h2>Inputs and Parameters</h2>
+  <ul>
+    <li>User request: update this repo copy instead of the earlier one.</li>
+    <li>Fix scope: ONNX GPU selection in <code>infer.py</code> and corresponding readiness logging in <code>batch_segmentation_core.py</code>.</li>
+  </ul>
+
+  <h2>Outputs</h2>
+  <ul>
+    <li>ONNX Runtime provider discovery now happens via a dedicated helper with best-effort DLL preloading.</li>
+    <li>ONNX CUDA sessions are attempted whenever <code>CUDAExecutionProvider</code> is available, even if PyTorch reports no CUDA.</li>
+    <li>Fallback device selection now defaults to GPU <code>0</code> when ONNX Runtime exposes CUDA but PyTorch cannot enumerate devices.</li>
+    <li>Batch logs now include the ONNX available-provider list.</li>
+  </ul>
+
+  <h2>Errors Encountered</h2>
+  <ul>
+    <li>No blocking command errors occurred.</li>
+    <li>No built-in test suite was present, so focused mocked validations were used.</li>
+  </ul>
+
+  <h2>Debugging Steps</h2>
+  <ul>
+    <li>Confirmed this repo copy still had the original <code>if self.device == "cuda"</code> ONNX gate.</li>
+    <li>Patched both the top-level ONNX selection path and the device-ID helper to avoid a second hidden PyTorch dependency.</li>
+    <li>Validated both the Windows-style mismatch case and the CPU-only fallback case.</li>
+  </ul>
+
+  <h2>Fixes Applied</h2>
+  <ul>
+    <li>Added <code>onnx_available_providers</code> and <code>onnx_requested_providers</code> state in <code>infer.py</code>.</li>
+    <li>Added <code>_get_onnx_available_providers()</code>.</li>
+    <li>Decoupled ONNX GPU selection from <code>torch.cuda.is_available()</code>.</li>
+    <li>Updated batch log messages to include available ONNX providers.</li>
+    <li>Removed generated <code>__pycache__</code> folders after validation.</li>
+  </ul>
+
+  <h2>Reruns Performed</h2>
+  <ul>
+    <li>Syntax validation with <code>python -m py_compile</code>.</li>
+    <li>Mocked validation case 1: PyTorch CPU-only + ONNX Runtime CUDA available.</li>
+    <li>Mocked validation case 2: CPU-only ONNX Runtime.</li>
+    <li>Whitespace/diff validation with <code>git diff --check</code>.</li>
+  </ul>
+
+  <h2>Final Results</h2>
+  <table>
+    <tr><th>Check</th><th>Result</th></tr>
+    <tr><td><code>python -m py_compile</code></td><td>Passed</td></tr>
+    <tr><td>Mocked mismatch case</td><td><code>device: cpu</code> and still obtained <code>session device ids: [0]</code> with actual providers <code>['CUDAExecutionProvider', 'CPUExecutionProvider']</code></td></tr>
+    <tr><td>Mocked CPU-only case</td><td>Retained clean CPU fallback with no GPU session IDs</td></tr>
+    <tr><td><code>git diff --check</code></td><td>Passed</td></tr>
+  </table>
+
+  <h2>Interpretation</h2>
+  <p>This repo copy now contains the same root-cause fix: ONNX GPU behavior follows ONNX Runtime provider availability instead of PyTorch CUDA availability.</p>
+
+  <h2>Limitations</h2>
+  <ul>
+    <li>The affected Windows machine was not available directly in this session.</li>
+    <li>The validation used mocked ONNX Runtime objects rather than a live CUDA session.</li>
+  </ul>
+
+  <h2>Next Steps</h2>
+  <ul>
+    <li>If this repo is the one the Windows user will pull from, push these changes and have them run <code>git pull</code> plus a reinstall.</li>
+    <li>Then confirm the batch log changes from CPU fallback to CUDA GPU readiness.</li>
+  </ul>
+</body>
+</html>

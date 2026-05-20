@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Master Summary - ONNX GPU Fix</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 2rem auto;
+      max-width: 960px;
+      line-height: 1.5;
+      color: #222;
+    }
+    h1, h2 { color: #0f3d5e; }
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      background: #f5f7fa;
+      padding: 1rem;
+      overflow-x: auto;
+      border: 1px solid #d8dee4;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid #d8dee4;
+      padding: 0.6rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef3f8; }
+  </style>
+</head>
+<body>
+  <h1>Master Summary</h1>
+  <p><strong>Task:</strong> apply the ONNX GPU decoupling fix to <code>/home/josh/workspace/prizm-public-2/prizm-public</code>.</p>
+
+  <h2>Detailed Report</h2>
+  <p><a href="onnx-gpu-decoupling-fix-2026-04-29.html">Open the detailed ONNX GPU decoupling fix report</a></p>
+
+  <h2>Objective</h2>
+  <p>Ensure this repository copy can use ONNX Runtime CUDA providers even when PyTorch is CPU-only.</p>
+
+  <h2>Setup / Environment</h2>
+  <table>
+    <tr><th>Item</th><th>Value</th></tr>
+    <tr><td>Repository</td><td><code>/home/josh/workspace/prizm-public-2/prizm-public</code></td></tr>
+    <tr><td>Date</td><td>2026-04-29</td></tr>
+    <tr><td>Shell</td><td><code>bash</code></td></tr>
+  </table>
+
+  <h2>Files Changed</h2>
+  <pre>src/prizm_napari/infer.py
+src/prizm_napari/batch_segmentation_core.py
+reports/onnx-gpu-decoupling-fix-2026-04-29.html
+reports/master-summary.html</pre>
+
+  <h2>Commands Run</h2>
+  <p>The cycle included source inspection, code patching, syntax validation, two mocked runtime validations, report generation, and cleanup of generated cache folders.</p>
+
+  <h2>Inputs and Parameters</h2>
+  <p>The fix applied here matches the ONNX/PyTorch mismatch diagnosed from the Windows machine outputs.</p>
+
+  <h2>Outputs</h2>
+  <ul>
+    <li>ONNX session selection now follows ONNX Runtime provider visibility.</li>
+    <li>Fallback device selection can still target GPU 0 if PyTorch cannot enumerate CUDA devices.</li>
+    <li>Batch logs now include available ONNX providers.</li>
+  </ul>
+
+  <h2>Errors Encountered</h2>
+  <p>No blocking errors occurred. No built-in tests were present, so focused mocked validation was used.</p>
+
+  <h2>Debugging Steps</h2>
+  <p>The original ONNX CUDA gate and device-ID logic were identified, patched, and validated against mocked provider scenarios.</p>
+
+  <h2>Fixes Applied</h2>
+  <p>The ONNX path was decoupled from <code>torch.cuda.is_available()</code> and now uses ONNX Runtime provider availability instead.</p>
+
+  <h2>Reruns Performed</h2>
+  <p>Validation included <code>python -m py_compile</code>, a mocked mismatch case, a mocked CPU-only case, and <code>git diff --check</code>.</p>
+
+  <h2>Final Results</h2>
+  <table>
+    <tr><th>Validation</th><th>Status</th></tr>
+    <tr><td>Syntax check</td><td>Pass</td></tr>
+    <tr><td>Mocked PyTorch-CPU / ORT-CUDA case</td><td>Pass</td></tr>
+    <tr><td>Mocked CPU-only ORT case</td><td>Pass</td></tr>
+    <tr><td><code>git diff --check</code></td><td>Pass</td></tr>
+  </table>
+
+  <h2>Interpretation</h2>
+  <p>This repo copy now contains the same stable root-cause fix for the ONNX GPU selection issue.</p>
+
+  <h2>Limitations</h2>
+  <p>The affected Windows machine was not directly available for a live end-to-end rerun in this session.</p>
+
+  <h2>Next Steps</h2>
+  <p>If this is the repo the Windows user should track, push these changes and have them run <code>git pull</code> and reinstall from this checkout.</p>
+</body>
+</html>

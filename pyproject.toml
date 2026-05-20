@@ -1,0 +1,141 @@
+[project]
+name = "prizm-napari"
+dynamic = ["version"]
+description = "A napari plugin for PRIZM"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Joshua Yedam You"},
+  {email = "jyy20422@kaist.ac.kr"},
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: napari",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "magicgui",
+    "pyqt5",
+    "qtpy",
+    "scikit-image",
+    "torch",
+    "torchvision",
+    "tensorboard",
+    "dask",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "openpyxl",
+    "segmentation-models-pytorch",
+    "onnx",
+    "onnxruntime",
+    "opencv-python",
+    "scikit-learn",
+    "umap-learn",
+    "statsmodels",
+    "seaborn",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+testing = [
+    "tox",
+    "pytest",  # https://docs.pytest.org/en/latest/contents.html
+    "pytest-cov",  # https://pytest-cov.readthedocs.io/en/latest/
+    "pytest-qt",  # https://pytest-qt.readthedocs.io/en/latest/
+    "napari",
+]
+
+[project.entry-points."napari.manifest"]
+prizm-napari = "prizm_napari:napari.yaml"
+
+[project.scripts]
+prizm-chemical-analysis = "prizm_napari.cli:main"
+prizm-batch-segmentation = "prizm_napari.batch_segmentation_cli:main"
+prizm-moa-2stage = "prizm_napari.moa_cli:main"
+prizm-minipanel-analysis = "prizm_napari.minipanel_cli:main"
+
+[project.urls]
+"Bug Tracker" = "https://github.com/NICALab/prizm-napari/issues"
+"Documentation" = "https://github.com/NICALab/prizm-napari#README.md"
+"Source Code" = "https://github.com/NICALab/prizm-napari"
+"User Support" = "https://github.com/NICALab/prizm-napari/issues"
+
+[build-system]
+requires = ["setuptools>=42.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml"]
+
+
+[tool.setuptools.dynamic]
+version = {attr = "prizm_napari.__init__.__version__"}
+
+[tool.black]
+line-length = 79
+target-version = ['py310', 'py311', 'py312', 'py313']
+
+[tool.ruff]
+line-length = 79
+lint.select = [
+    "E", "F", "W", #flake8
+    "UP", # pyupgrade
+    "I", # isort
+    "BLE", # flake8-blind-exception
+    "B", # flake8-bugbear
+    "A", # flake8-builtins
+    "C4", # flake8-comprehensions
+    "ISC", # flake8-implicit-str-concat
+    "G", # flake8-logging-format
+    "PIE", # flake8-pie
+    "SIM", # flake8-simplify
+]
+lint.ignore = [
+    "E501", # line too long. let black handle this
+    "UP006", "UP007", # type annotation. As using magicgui require runtime type annotation then we disable this.
+    "SIM117", # flake8-simplify - some of merged with statements are not looking great with black, reanble after drop python 3.9
+]
+
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".mypy_cache",
+    ".pants.d",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+    "*vendored*",
+    "*_vendor*",
+]
+
+target-version = "py310"
+fix = true

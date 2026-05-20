@@ -1,0 +1,29 @@
+name: prizm-napari
+display_name: PRIZM
+# use 'hidden' to remove plugin from napari hub search results
+visibility: public
+# see https://napari.org/stable/plugins/technical_references/manifest.html#fields for valid categories
+categories: ["Annotation", "Segmentation", "Image Processing", "Measurement", "Visualization"]
+contributions:
+  commands:
+    # - id: prizm-napari.make_qwidget
+    #   python_name: prizm_napari:PRIZMSegmentationQWidget
+    #   title: Make PRIZM Segmentation
+    - id: prizm-napari.make_qwidget_batch
+      python_name: prizm_napari:PRIZMBatchSegmentationQWidget
+      title: Make PRIZM Batch Segmentation
+    - id: prizm-napari.make_qwidget_moa_prediction
+      python_name: prizm_napari:PRIZMMoAPredictionQWidget
+      title: Make PRIZM MoA 2-Stage Prediction
+    - id: prizm-napari.make_qwidget_minipanel
+      python_name: prizm_napari:PRIZMMiniPanelQWidget
+      title: Make PRIZM MiniPanel Heatmap/LDA
+  widgets:
+    # - command: prizm-napari.make_qwidget
+    #   display_name: PRIZM Segmentation
+    - command: prizm-napari.make_qwidget_batch
+      display_name: PRIZM Batch Segmentation
+    - command: prizm-napari.make_qwidget_moa_prediction
+      display_name: PRIZM MoA 2-Stage Prediction
+    - command: prizm-napari.make_qwidget_minipanel
+      display_name: PRIZM MiniPanel Heatmap/LDA
