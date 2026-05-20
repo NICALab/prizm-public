@@ -397,7 +397,7 @@ You should again see package information for `prizm-napari`.
 
 ## Running Demo Dataset
 
-The dataset from the paper can be used to verify batch
+The dataset from the paper (https://doi.org/10.6084/m9.figshare.32109697) can be used to verify batch
 segmentation, functional analysis, and MiniPanel output generation. In
 the commands below, replace `/path/to/figshare_dataset` with the folder
 where you downloaded or mounted the figshare dataset.
