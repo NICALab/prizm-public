@@ -1,4 +1,4 @@
-# prizm-napari
+# prizm-public
 
 PRIZM is a napari-based toolkit for zebrafish cardiac analysis. This codebase focuses on the currently exposed GUI tools and
 matching command-line interfaces for:
