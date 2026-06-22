@@ -109,6 +109,8 @@ starting from a fresh machine. If you are using macOS or Linux, use
 Terminal instead of Anaconda Prompt and replace Windows commands such as
 `dir` and `where` with the equivalents for your platform.
 
+The demo dataset and pretrained model files can be found at https://doi.org/10.6084/m9.figshare.32109697.
+
 1. Install Git.
 
 Download and install Git from the
