@@ -653,4 +653,6 @@ Use `prizm-minipanel-analysis --help` for the full option list.
 
 ## License
 
-Distributed under the terms of the [BSD-3](LICENSE) license.
+This project is licensed under the PolyForm Noncommercial License 1.0.0.
+
+Commercial use is not permitted without a separate license from the copyright holder.
