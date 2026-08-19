@@ -2,14 +2,6 @@
 
 PRIZM is a napari-based toolkit for zebrafish cardiac analysis.
 
-Name guide for new users:
-
-- `prizm-public`: the GitHub repository name and the folder name you will
-  clone onto your computer
-- `prizm-napari`: the Python package name that gets installed when you run
-  `pip install .`
-- `PRIZM`: the name you will see inside the napari `Plugins` menu
-
 ## Table of Contents
 
 - [Overview](#overview)
@@ -427,6 +419,7 @@ prizm-batch-segmentation \
   --model "/path/to/figshare_dataset/Trained_model/PRIZM-DeepLab_2026-04-21-10-55.onnx.ortfixed.onnx" \
   --model-type onnx \
   --input-channels 3 \
+  --postprocess-masks \
   --infer-batch-size 8
 ```
 
@@ -440,6 +433,12 @@ Expected demo output:
 - one output folder per input series, such as `Series006`, `Series008`,
   and so on
 - raw and cleaned segmentation TIFF files for each series
+- JPG frame visualizations by default (`cropped`, `preprocessing`, `masked`,
+  and `FS`); select TIFF instead with the GUI or CLI visualization-format
+  control
+- masked and FS GIFs with per-frame elapsed time and a centered 50 µm
+  scale bar; GIF playback follows the recorded frame intervals and loops
+  continuously
 - per-series analysis outputs under each series folder
 - one condition-level `PerFishMetrics_*.xlsx` workbook under
   `Representative image dataset/results`
@@ -447,7 +446,7 @@ Expected demo output:
 
 On a computer with an NVIDIA GeForce RTX
 3080 GPU, this command processed 14 series with 589 frames each in around 20 minutes. The resulting
-`batch_combined_*.csv` contained 14 rows and 72 columns.
+`batch_combined_*.csv` contained one row per series.
 
 The generated `PerFishMetrics_*.xlsx` workbook can also be used to verify
 the MiniPanel CLI:
@@ -475,9 +474,9 @@ Expected input layout:
 ```text
 Root Data Directory
 ├── {CHEMICAL}_{CONCENTRATION}/
-│   ├── sample_{ID}/
+│   ├── {SAMPLE_OR_SERIES}/
 │   │   ├── frame_0.png
-│   │   ├── frame_1.png
+│   │   ├── frame_1.tif
 │   │   ├── ...
 │   │   └── metadata/                # optional
 │   │       └── {ID}_Properties.xml  # optional
@@ -487,35 +486,66 @@ Root Data Directory
 
 Basic workflow:
 
-<details>
-  <summary>(Click to see screenshot) Open <code>Plugins -> PRIZM -> PRIZM Batch Segmentation</code>.</summary>
-  <img src="readme_img/plugins_tab_batch_crop.png" alt="PRIZM Batch Segmentation menu">
-</details>
-
-<details>
-  <summary>(Click to see screenshot) Fill in the batch segmentation widget fields.</summary>
-  <img src="readme_img/batch_plugin_ui.png" alt="PRIZM Batch Segmentation widget">
-</details>
-
 1. Open `Plugins -> PRIZM -> PRIZM Batch Segmentation`.
-2. Review the batch segmentation widget fields shown above.
-3. Set `Root Data Directory` to the folder containing condition
-subfolders.
-4. Choose `Metadata Mode`.
-   If you use XML metadata, keep `Use Metadata XML`.
-   If not, switch to `Manual Entry` and fill in `Resize Scale` and
-   `Relative Time Interval (sec)`.
-5. Set `Output Directory`.
-6. Choose `Model File`.
-7. Optionally adjust model settings such as `Model Type`, `Channel
-Mode`, `Channel to segment`, `Backbone`, `Encoder Depth`,
-`Decoder Channels`, `Encoder Output Stride`, `Atrous Rates`, and
-`Input Channels`.
-8. Optionally enable `Postprocess masks before saving and analysis`.
-9. Click `Run Batch`.
+2. Set `Root Data Directory` to the parent folder containing the
+   `{CHEMICAL}_{CONCENTRATION}` condition folders. Each condition folder
+   must contain one or more sample/series folders with `.png`, `.jpg`,
+   `.jpeg`, `.tif`, or `.tiff` frames.
+3. Choose `Metadata Mode`:
+
+   - `Manual Entry` is the GUI default. Enter the image scale in
+     `Resize Scale` (micrometres per source pixel) and the seconds between
+     frames in `Relative Time Interval`. The defaults are `0.9210` and
+     `0.062`.
+   - `Use Metadata XML` disables those two manual fields and searches each
+     sample and condition folder for the matching XML metadata.
+4. Set `Output Directory`. PRIZM creates the condition, sample, and results
+   subfolders inside it without modifying the input data.
+5. Click `Browse Model...` and choose the `.onnx` or `.pth` segmentation
+   model. The file extension selects the matching `Model Type`
+   automatically.
+6. Set the image input:
+
+   - `Select Channel` uses `Channel to segment`; the default `1` is the green
+     channel (`0` red/gray, `2` blue).
+   - `Convert to Grayscale` converts the source frames and disables the
+     channel field.
+7. Confirm the model settings. For an ONNX model, the exported graph already
+   fixes `Backbone`, `Encoder Depth`, `Decoder Channels`, `Encoder Output
+   Stride`, and `Atrous Rates`, so those fields are disabled. `Model Input
+   Channels` is detected from the ONNX graph when possible; the figshare
+   demo model uses `3`. The architecture fields are editable for `.pth`
+   checkpoints and must match how that checkpoint was trained.
+8. Leave `Inference Batch Size` at `1` unless you have tested a larger value
+   with the available GPU memory.
+9. Choose `Visualization Format`. `jpg` is the space-saving default; `tif`
+   writes the four human-viewable frame sets as TIFF instead.
+10. Keep `Postprocess masks before saving and analysis` checked. It is
+    enabled by default and corrects the inference masks before PRIZM saves
+    them and runs downstream measurements.
+11. Optional: check `Load images and segmentations to napari` to add the
+    completed image and label stacks to the open viewer. Check `Generate
+    analysis visualization overlay` as well if that overlay should also be
+    added to napari. Both are off by default because large batches can use a
+    lot of memory.
+12. Click `Run Batch`. The progress bar and `Batch Log` show the current
+    sample and stage. `Stop` requests cancellation after the current work can
+    stop safely.
 
 Outputs are written to the selected output directory, including
 per-sample results and a combined batch CSV.
+
+For either visualization choice, the integer-valued raw and cleaned
+segmentation label stacks are always saved as lossless TIFF. Only the
+human-viewable `cropped`, `preprocessing`, `masked`/`labeled`, and `FS`
+frames change format. The masked and FS GIFs receive the elapsed-time and
+50 µm scale-bar burn-in; individual frame files remain unannotated.
+
+The crop and heart-detection window are scaled from the acquisition
+metadata so that different microscope pixel sizes retain approximately the
+same physical field of view. The cropped image is then resized to 300 x 300
+for the current PRIZM model. If metadata is missing or invalid, PRIZM uses
+the existing 0.9210 µm/pixel baseline.
 
 ### PRIZM MoA 2-Stage Prediction
 
@@ -525,21 +555,36 @@ from `PerFishMetrics_*.xlsx` workbooks.
 Basic workflow:
 
 1. Open `Plugins -> PRIZM -> PRIZM MoA 2-Stage Prediction`.
-2. Set `Excel Root Directory (recursive)` to the folder containing the
-workbooks.
-3. Click `Pick TRAIN / Vehicle / UNKNOWN...` and assign files to the
-three roles.
-4. Set `Output Directory`.
-5. Optionally keep `Generate visual reports` enabled.
-6. Optionally keep `Include TRAIN files in prediction outputs` enabled.
-7. If needed, expand `Training Parameters` and adjust settings such as
-`Target FPR`, `Min Match Fraction`, `Stage1 Final ID`, `CV Folds`,
-`Similarity Metric`, `Similarity Top-K`, `Dominance Alpha`,
-`Permutation N`, and `Random Seed`.
-8. Click `Run 2-Stage MoA`.
+2. Set `Excel Root Directory (recursive)` to a parent folder containing the
+   `PerFishMetrics_*.xlsx` workbooks. PRIZM searches all subfolders and shows
+   the number discovered.
+3. Click `Pick TRAIN / Vehicle / UNKNOWN...`. Complete the dialogs in order:
 
-The output directory will contain the MoA prediction bundle, train
-report workbook, master workbook, and optional figures.
+   1. In `Pick TRAIN Files`, check the known training workbooks. Use `Move Up`
+      and `Move Down` if their order matters.
+   2. In `Pick Vehicle(Control)`, select at least one vehicle/control workbook
+      from the TRAIN set.
+   3. In `Edit Non-Vehicle TRAIN Group Names`, confirm or edit the MoA group
+      assigned to every other TRAIN workbook.
+   4. In `Pick UNKNOWN Files`, select the remaining workbooks that should be
+      predicted.
+4. Review `Selected Roles` before running. Vehicle workbooks must appear as
+   `Vehicle`; all other TRAIN workbooks must have the intended group name.
+5. Set `Output Directory`. If left blank, PRIZM creates a timestamped
+   `PRIZM_2STAGE_results_*` folder under the selected Excel root.
+6. `Generate visual reports` and `Include TRAIN files in prediction outputs`
+   are both checked by default. Leave them checked for the complete output.
+7. Keep the collapsed `Training Parameters` at their defaults unless you are
+   intentionally reproducing a different validated analysis configuration.
+   The current core defaults include target FPR `0.05`, minimum feature match
+   `0.90`, five CV folds, robust median/MAD control statistics, Euclidean
+   similarity with top `3`, `200` bagged trees, and random seed `0`.
+8. Click `Run 2-Stage MoA`. When it finishes, napari displays a summary with
+   the output paths.
+
+The output directory contains `prizm_bundle_2STAGE.mat`,
+`TRAIN_2STAGE_report.xlsx`, `MASTER_unknown_2STAGE.xlsx`, per-workbook
+prediction files, and the visual-report files when enabled.
 
 ### PRIZM MiniPanel Heatmap/LDA
 
@@ -550,20 +595,33 @@ dimensionality-reduction views.
 Basic workflow:
 
 1. Open `Plugins -> PRIZM -> PRIZM MiniPanel Heatmap/LDA`.
-2. Set `Excel Root Directory (recursive)` to the folder containing the
-workbooks.
-3. Click `Pick Files / Order...` and choose the files to analyze in the
-desired order.
-4. Set `Output Directory`.
-5. Click `Pick Control / Reference / Stats...` to choose the control
-group, reference group, and statistics options.
-6. Leave or adjust the analysis toggles: `Generate heatmap`,
-`Run Fisher LDA`, `Run PCA`, and `Run t-SNE`.
-7. Set `Bar Panel Columns` if you want a different panel layout.
-8. Click `Run MiniPanel Analysis`.
+2. Set `Excel Root Directory (recursive)` to a parent folder containing the
+   `PerFishMetrics_*.xlsx` workbooks. PRIZM searches all subfolders and
+   initially selects every discovered workbook.
+3. Click `Pick Files / Order...`. Check only the workbooks to analyze and use
+   `Move Up`/`Move Down` to set their display order. Selecting `OK`
+   immediately opens the control/reference dialog.
+4. In `Pick Control / Reference / Stats...`:
 
-The output directory will contain the panel outputs, statistics
-workbook, and any enabled dimensionality-reduction plots.
+   - choose the actual vehicle/control workbook as `Control Group`;
+   - choose the group used for statistical and heatmap comparisons as
+     `Reference Group` (normally the same control group);
+   - keep `Include reference group in heatmap` checked if its heatmap column
+     should be shown;
+   - enable `Save all pairwise Welch t-tests` only if the extra all-pairs
+     tables are needed. It is off by default.
+5. Review the selected-workbook order and the control/reference summary.
+6. Set `Output Directory`. If left blank, PRIZM creates a timestamped
+   `output_*` folder under the selected Excel root.
+7. `Generate heatmap`, `Run Fisher LDA`, `Run PCA`, and `Run t-SNE` are all
+   checked by default. Disable only the outputs you do not need. `Bar Panel
+   Columns` defaults to `5`.
+8. Click `Run MiniPanel Analysis`. When it finishes, napari displays a
+   summary with the output paths.
+
+The output directory contains `panel_heatmap/mini_bar_panel.*`,
+`panel_heatmap/heatmap.*`, `panel_heatmap/stats_significance.xlsx`,
+`LDA_REPORT/`, and `FIGURES_300dpi/` for the enabled analyses.
 
 ## Command-Line Usage
 
@@ -575,7 +633,11 @@ Run batch segmentation and downstream analysis without napari.
 prizm-batch-segmentation \
   --data-dir /path/to/data \
   --output-dir /path/to/output \
-  --model /path/to/model.onnx
+  --model /path/to/model.onnx \
+  --model-type onnx \
+  --input-channels 3 \
+  --postprocess-masks \
+  --visualization-format jpg
 ```
 
 Common options:
@@ -583,13 +645,19 @@ Common options:
 - `--model-type {auto,onnx,pth}`
 - `--channel <int>`
 - `--grayscale`
-- `--postprocess-masks`
+- `--postprocess-masks`: postprocess inference masks before saving and
+  analysis; unlike the GUI, CLI postprocessing is off unless this flag is
+  supplied
+- `--backbone`, `--encoder-depth`, `--decoder-channels`,
+  `--encoder-output-stride`, and `--atrous-rates`: `.pth` architecture
+  settings
 - `--metadata-mode {xml,manual}`
 - `--metadata-file <path>`
 - `--resize-scale <float>`
 - `--frame-interval <float>`
 - `--infer-batch-size <int>`: default `1`
 - `--input-channels <int>`: use `3` for the figshare ONNX demo model
+- `--visualization-format {jpg,tif}`: default `jpg`; label stacks remain TIFF
 - `--no-amp`
 
 Use `prizm-batch-segmentation --help` for the full option list.
@@ -612,16 +680,23 @@ Common options:
 - `--missing-frac-max <float>`
 - `--min-match-frac <float>`
 - `--top-features <int>`
+- `--rng-seed <int>`
+- `--n-trees <int>`
+- `--target-fpr <float>`
 - `--stage1-final-id <name>`
 - `--sim-metric {euclid,cosine}`
 - `--sim-top-k <int>`
+- `--self-label <name>`
 - `--dominance-alpha <float>`
 - `--dominance-competitor-mode {mean,top2mean,best}`
 - `--perm-n <int>`
+- `--perm-max-exact-n <int>`
 - `--no-figures`
+- `--no-robust-control-stats`
 - `--no-self-similarity`
 - `--no-dominance-stats`
 - `--no-ml-dominance-stats`
+- `--include-self-in-dominance`
 - `--no-train-in-analysis`
 
 Use `prizm-moa-2stage --help` for the full option list.

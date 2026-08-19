@@ -1,5 +1,5 @@
 import os
-from typing import Tuple, Optional, Sequence
+from typing import Iterable, Tuple, Optional, Sequence
 import numpy as np
 import pandas as pd
 from skimage.measure import label, regionprops, regionprops_table
@@ -17,10 +17,15 @@ from scipy.signal import find_peaks, hilbert, peak_widths, correlate, correlatio
 from scipy.stats import pearsonr
 from datetime import datetime
 from PIL import Image
-import imageio
 from tqdm import tqdm
 from pathlib import Path
 from prizm_napari.utils import *
+from prizm_napari.output_utils import (
+    normalize_visualization_format,
+    save_visualization,
+    visualization_name,
+)
+from prizm_napari.uncertainty import cleaned_atrium_segment_entropy
 
 # ----------------------------
 # Global visual/style settings
@@ -47,6 +52,7 @@ COLOR_CC_LAG   = 'r'
 
 # fixed margins for a single-axes layout
 _AX_RECT = dict(left=0.07, right=0.995, top=0.90, bottom=0.22)
+MINOR_AXIS_FRAC_OFFSETS = tuple(np.linspace(-0.15, 0.15, 9))
 
 MATLAB_FRAME_EXPORT_COLUMNS = [
     "FileName",
@@ -81,6 +87,9 @@ MATLAB_FRAME_EXPORT_COLUMNS = [
     "LenPerPx",
     "AreaPerPx2",
     "UnitStr",
+    "AtriumPredictionPresent",
+    "AtriumSegmentPixels",
+    "AtriumSegmentEntropyMean_nats",
 ]
 
 MATLAB_PERFISH_EXPORT_COLUMNS = [
@@ -130,6 +139,11 @@ MATLAB_PERFISH_EXPORT_COLUMNS = [
     "PeakTimeDiff_SD",
     "AV_Delay_Mean",
     "AV_Delay_SD",
+    "AtriumSegmentEntropyMean_nats",
+    "AtriumSegmentEntropyMax_nats",
+    "AtriumSegmentEntropyP95_nats",
+    "AtriumSegmentEntropyValidFrames",
+    "AtriumPredictionMissingFrames",
 ]
 
 def _save_svg(fig, path, dpi=300):
@@ -137,6 +151,38 @@ def _save_svg(fig, path, dpi=300):
     fig.set_size_inches(FIGSIZE[0], FIGSIZE[1], forward=True)
     fig.subplots_adjust(**_AX_RECT)   # no tight_layout()
     fig.savefig(path, format='svg', dpi=dpi)   # fixed canvas every time
+
+
+def summarize_segmentation_uncertainty(seg_df: pd.DataFrame) -> dict[str, float | int]:
+    """Aggregate the recorded per-frame atrial entropy values."""
+    entropy = pd.to_numeric(
+        seg_df.get(
+            "AtriumSegmentEntropyMean_nats",
+            pd.Series(np.nan, index=seg_df.index, dtype=float),
+        ),
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    finite_entropy = entropy[np.isfinite(entropy)]
+
+    if "AtriumPredictionPresent" in seg_df.columns:
+        present = seg_df["AtriumPredictionPresent"].fillna(False).astype(bool).to_numpy()
+        missing_frames = int(np.count_nonzero(~present))
+    else:
+        missing_frames = int(len(seg_df))
+
+    return {
+        "AtriumSegmentEntropyMean_nats": (
+            float(np.mean(finite_entropy)) if finite_entropy.size else np.nan
+        ),
+        "AtriumSegmentEntropyMax_nats": (
+            float(np.max(finite_entropy)) if finite_entropy.size else np.nan
+        ),
+        "AtriumSegmentEntropyP95_nats": (
+            float(np.percentile(finite_entropy, 95)) if finite_entropy.size else np.nan
+        ),
+        "AtriumSegmentEntropyValidFrames": int(finite_entropy.size),
+        "AtriumPredictionMissingFrames": missing_frames,
+    }
 
 
 def derive_matlab_series_key(frame_filenames: Optional[Sequence[str]], fallback: Optional[str] = None) -> str:
@@ -183,6 +229,11 @@ def matlab_style_segmentation_dataframe(seg_stats_df: pd.DataFrame) -> pd.DataFr
     out["LenPerPx"] = seg_stats_df.get("LenPerPx", np.nan)
     out["AreaPerPx2"] = seg_stats_df.get("AreaPerPx2", np.nan)
     out["UnitStr"] = seg_stats_df.get("UnitStr", "")
+    out["AtriumPredictionPresent"] = seg_stats_df.get("AtriumPredictionPresent", False)
+    out["AtriumSegmentPixels"] = seg_stats_df.get("AtriumSegmentPixels", 0)
+    out["AtriumSegmentEntropyMean_nats"] = seg_stats_df.get(
+        "AtriumSegmentEntropyMean_nats", np.nan
+    )
     return out.loc[:, MATLAB_FRAME_EXPORT_COLUMNS]
 
 
@@ -787,7 +838,7 @@ def compute_segmentation_stats(
         if not np.any(vmask) or not np.any(amask):
             return np.nan, np.nan, None, None, None, (np.nan, np.nan), (np.nan, np.nan)
 
-        bw = (g > 0.10).astype(np.uint8)
+        bw = (g > 0.20).astype(np.uint8)
         n_lbl, lbls, stats_cc, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
         if n_lbl > 1:
             areas = stats_cc[1:, cv2.CC_STAT_AREA]
@@ -1032,18 +1083,19 @@ def compute_segmentation_stats(
                     color=YELL, thickness=2
                 )
 
-                # Minor axes at center, +10%, -10%
+                # Measure nine candidate minor axes across +/-15% of the
+                # major axis. Selection and rendering happen once, after the
+                # full video is available, using ventricular-area correlation.
                 v_major = np.array([best_pos[0] - best_neg[0], best_pos[1] - best_neg[1]], dtype=float)
                 v_major /= (np.linalg.norm(v_major) + 1e-12)
                 minor_angle = wrap360(best_angle + 90.0)
                 radm = math.radians(minor_angle)
                 v_minor = np.array([math.cos(radm), math.sin(radm)], dtype=float)
 
-                offset = 0.1 * max_dist
                 centers = [
-                    np.array([axis_center[0], axis_center[1]], dtype=float),
-                    np.array([axis_center[0], axis_center[1]], dtype=float) + offset * v_major,
-                    np.array([axis_center[0], axis_center[1]], dtype=float) - offset * v_major,
+                    np.array([axis_center[0], axis_center[1]], dtype=float)
+                    + float(offset_fraction) * max_dist * v_major
+                    for offset_fraction in MINOR_AXIS_FRAC_OFFSETS
                 ]
 
                 minor_lengths = []
@@ -1054,17 +1106,14 @@ def compute_segmentation_stats(
                     length = math.hypot(pos_in[0] - neg_in[0], pos_in[1] - neg_in[1]) * len_per_px
                     minor_lengths.append(length)
                     minor_segments.append((pos_in, neg_in))
-                    # Draw minor segment (red)
-                    cv2.line(
-                        fs,
-                        (int(round(pos_in[0])), int(round(pos_in[1]))),
-                        (int(round(neg_in[0])), int(round(neg_in[1]))),
-                        color=RED, thickness=2
-                    )
 
-                stats["minorAxis_center"] = float(minor_lengths[0])
-                stats["minorAxis_upper"]  = float(minor_lengths[1])
-                stats["minorAxis_lower"]  = float(minor_lengths[2])
+                center_index = int(np.argmin(np.abs(MINOR_AXIS_FRAC_OFFSETS)))
+                center_length = float(minor_lengths[center_index])
+                stats["minorAxis_center"] = center_length
+                stats["minorAxis_upper"] = center_length
+                stats["minorAxis_lower"] = center_length
+                stats["_minor_axis_lengths"] = tuple(float(v) for v in minor_lengths)
+                stats["_minor_axis_segments"] = tuple(minor_segments)
 
                 top_v, bot_v = ventricle_top_bottom_on_major(best_pos, best_neg)
 
@@ -1286,6 +1335,186 @@ def _circular_mean_deg(x: np.ndarray) -> float:
     return float(np.mod(np.rad2deg(np.arctan2(np.mean(np.sin(ang)), np.mean(np.cos(ang)))), 360.0))
 
 
+def _select_minor_axis_candidate(
+    candidate_lengths: Sequence[Optional[Sequence[float]]],
+    ventricular_area: Sequence[float],
+) -> tuple[int, np.ndarray]:
+    """Choose one minor-axis offset using whole-video area correlation."""
+    candidate_count = len(MINOR_AXIS_FRAC_OFFSETS)
+    matrix = np.full((len(candidate_lengths), candidate_count), np.nan, dtype=float)
+    for row_index, values in enumerate(candidate_lengths):
+        if values is None:
+            continue
+        array = np.asarray(values, dtype=float).reshape(-1)
+        if array.size == candidate_count:
+            matrix[row_index] = array
+
+    area = np.asarray(ventricular_area, dtype=float).reshape(-1)
+    correlations = np.full(candidate_count, np.nan, dtype=float)
+    for candidate_index in range(candidate_count):
+        values = matrix[:, candidate_index]
+        valid = np.isfinite(values) & np.isfinite(area)
+        if np.count_nonzero(valid) < 2:
+            continue
+        if np.ptp(values[valid]) <= 0 or np.ptp(area[valid]) <= 0:
+            continue
+        correlations[candidate_index] = float(
+            np.corrcoef(values[valid], area[valid])[0, 1]
+        )
+
+    if np.any(np.isfinite(correlations)):
+        winner = int(np.nanargmax(correlations))
+    else:
+        winner = int(np.argmin(np.abs(MINOR_AXIS_FRAC_OFFSETS)))
+    return winner, correlations
+
+
+def _burn_in_timestamp_and_scalebar(
+    frame: np.ndarray,
+    t_sec: float,
+    um_per_px: float,
+    scale_bar_um: float = 50.0,
+) -> np.ndarray:
+    """Return a copied RGB frame with time and physical scale annotations."""
+    output = np.array(frame, dtype=np.uint8, copy=True)
+    height, width = output.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.4
+    thickness = 1
+    cv2.putText(
+        output,
+        f"{float(t_sec):.2f}s",
+        (6, max(12, height - 8)),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    valid_scale = float(um_per_px) if np.isfinite(um_per_px) and um_per_px > 0 else 0.9210
+    bar_px = max(1, int(round(float(scale_bar_um) / valid_scale)))
+    x2 = max(8, width - 8)
+    x1 = max(2, x2 - bar_px)
+    y = max(14, height - 10)
+    cv2.line(output, (x1, y), (x2, y), (255, 255, 255), 2, cv2.LINE_AA)
+    scale_text = f"{float(scale_bar_um):g} um"
+    (text_width, text_height), _baseline = cv2.getTextSize(
+        scale_text,
+        font,
+        font_scale,
+        thickness,
+    )
+    # Center the label over the physical scale bar and keep it inside the frame.
+    text_x = int(round((x1 + x2 - text_width) / 2.0))
+    text_x = min(max(0, text_x), max(0, width - text_width))
+    text_y = max(text_height + 1, y - 5)
+    cv2.putText(
+        output,
+        scale_text,
+        (text_x, text_y),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+    return output
+
+
+def _gif_timeline(relative_times: Sequence[float]) -> tuple[np.ndarray, list[int]]:
+    """Return display timestamps and positive GIF frame durations in milliseconds."""
+    timestamps = np.asarray(relative_times, dtype=float).reshape(-1).copy()
+    if timestamps.size == 0:
+        return timestamps, []
+
+    finite_diffs = np.diff(timestamps)
+    finite_diffs = finite_diffs[np.isfinite(finite_diffs) & (finite_diffs > 0)]
+    fallback_interval = float(np.median(finite_diffs)) if finite_diffs.size else 0.062
+    if not np.isfinite(fallback_interval) or fallback_interval <= 0:
+        fallback_interval = 0.062
+
+    if not np.isfinite(timestamps[0]):
+        timestamps[0] = 0.0
+    for index in range(1, timestamps.size):
+        if not np.isfinite(timestamps[index]) or timestamps[index] <= timestamps[index - 1]:
+            timestamps[index] = timestamps[index - 1] + fallback_interval
+
+    durations_seconds = np.diff(timestamps, prepend=timestamps[0])
+    durations_seconds[0] = fallback_interval
+    invalid = ~np.isfinite(durations_seconds) | (durations_seconds <= 0)
+    durations_seconds[invalid] = fallback_interval
+
+    # GIF delays have 10 ms resolution. Pillow accepts milliseconds and writes
+    # the corresponding Graphic Control Extension for every frame.
+    durations_ms = [
+        max(10, int(round(float(duration) * 1000.0)))
+        for duration in durations_seconds
+    ]
+    return timestamps, durations_ms
+
+
+def save_gif_with_relative_times(
+    frames_rgb: Iterable[np.ndarray],
+    relative_times: Sequence[float],
+    gif_path: str | os.PathLike,
+    *,
+    um_per_px: float = 0.9210,
+    scale_bar_um: float = 50.0,
+) -> str:
+    """Save an annotated, infinitely looping GIF with real frame timing.
+
+    Annotation is applied to copied frames, so the corresponding per-frame JPG
+    or TIFF visualizations remain unannotated.
+    """
+    timestamps, durations_ms = _gif_timeline(relative_times)
+    if timestamps.size == 0:
+        raise ValueError("Cannot save a GIF without relative timestamps")
+
+    gif_frames: list[Image.Image] = []
+    frame_iterator = iter(frames_rgb)
+    for frame_index, timestamp in enumerate(timestamps):
+        try:
+            frame = next(frame_iterator)
+        except StopIteration as error:
+            raise ValueError(
+                "GIF frame count does not match relative timestamp count: "
+                f"{frame_index} vs {timestamps.size}"
+            ) from error
+        annotated = _burn_in_timestamp_and_scalebar(
+            frame,
+            float(timestamp),
+            um_per_px,
+            scale_bar_um=scale_bar_um,
+        )
+        gif_frames.append(
+            Image.fromarray(annotated).quantize(
+                colors=256,
+                method=Image.Quantize.MEDIANCUT,
+            )
+        )
+
+    sentinel = object()
+    if next(frame_iterator, sentinel) is not sentinel:
+        raise ValueError(
+            "GIF frame count exceeds relative timestamp count: "
+            f"more than {timestamps.size} frames"
+        )
+    if not gif_frames:
+        raise ValueError("Cannot save a GIF without frames")
+
+    destination = Path(gif_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    gif_frames[0].save(
+        destination,
+        format="GIF",
+        save_all=True,
+        append_images=gif_frames[1:],
+        duration=durations_ms,
+        loop=0,
+    )
+    return str(destination)
+
+
 def compute_segmentation_statistics(
     stack,
     masks,
@@ -1301,10 +1530,14 @@ def compute_segmentation_statistics(
     apply_mask_cleanup: bool = True,
     frames_are_preprocessed: bool = False,
     matlab_series_key: Optional[str] = None,
+    atrium_probabilities: Optional[np.ndarray] = None,
+    visualization_format: str = "jpg",
 ):
     """
     stack : (T,H,W) uint8/float array (grayscale frames)
     masks : (T,H,W) int/uint8 with labels {0:bg, 1:ventricle, 2:atrium}
+    atrium_probabilities : optional (T,H,W) atrial class probabilities
+    visualization_format : format for unannotated per-frame FS exports
     """
     num_images = masks.shape[0]
     if meta_file is not None and meta_info is None:
@@ -1318,7 +1551,8 @@ def compute_segmentation_statistics(
         if meta_info.get("relative_times") is not None:
             relative_times_vec = np.asarray(meta_info["relative_times"], dtype=float).reshape(-1)
         else:
-            dt = float(meta_info.get("frame_interval", 0.062))
+            frame_interval_value = meta_info.get("frame_interval", 0.062)
+            dt = float(frame_interval_value if frame_interval_value is not None else 0.062)
             relative_times_vec = np.array([dt * i for i in range(num_images)], dtype=float)
     else:
         relative_times_vec = np.array([0.062 * i for i in range(num_images)], dtype=float)
@@ -1330,6 +1564,16 @@ def compute_segmentation_statistics(
     if relative_times_vec.size == 0:
         relative_times_vec = np.array([0.062 * i for i in range(num_images)], dtype=float)
 
+    visualization_format = normalize_visualization_format(visualization_format)
+    if atrium_probabilities is not None:
+        atrium_probabilities = np.asarray(atrium_probabilities)
+        expected_shape = tuple(np.asarray(masks).shape)
+        if tuple(atrium_probabilities.shape) != expected_shape:
+            raise ValueError(
+                "Atrium probability shape must match the segmentation masks: "
+                f"{atrium_probabilities.shape} vs {expected_shape}"
+            )
+
     fnames = None
     if frame_filenames is not None:
         fnames = [str(x) for x in frame_filenames]
@@ -1339,6 +1583,8 @@ def compute_segmentation_statistics(
     seg_stats = []
     fs_frames_bgr = []
     cleaned_masks = [] if return_cleaned_masks else None
+    minor_axis_candidates = []
+    minor_axis_segments = []
 
     # Track updated MATLAB major-axis state between frames in the same sample.
     prev_major_angle = None
@@ -1406,6 +1652,19 @@ def compute_segmentation_statistics(
         else:
             rel_t = float(relative_times_vec[min(i, relative_times_vec.size - 1)])
 
+        if atrium_probabilities is None:
+            atrium_pixels = int(np.count_nonzero(cleaned_labels == 2))
+            uncertainty_i = {
+                "atrium_prediction_present": atrium_pixels > 0,
+                "segment_pixels": atrium_pixels,
+                "segment_entropy_mean": np.nan,
+            }
+        else:
+            uncertainty_i = cleaned_atrium_segment_entropy(
+                atrium_probabilities[i],
+                cleaned_labels,
+            )
+
         seg_stats.append({
             "FileName": frame_name,
             "RelativeTime": rel_t,
@@ -1466,11 +1725,63 @@ def compute_segmentation_statistics(
             "LenPerPx": stats_i["LenPerPx"],
             "AreaPerPx2": stats_i["AreaPerPx2"],
             "UnitStr": stats_i["UnitStr"],
+            "AtriumPredictionPresent": bool(
+                uncertainty_i["atrium_prediction_present"]
+            ),
+            "AtriumSegmentPixels": int(uncertainty_i["segment_pixels"]),
+            "AtriumSegmentEntropyMean_nats": float(
+                uncertainty_i["segment_entropy_mean"]
+            ),
         })
 
         fs_frames_bgr.append(fs_overlay_i)
+        minor_axis_candidates.append(stats_i.get("_minor_axis_lengths"))
+        minor_axis_segments.append(stats_i.get("_minor_axis_segments"))
         if cleaned_masks is not None:
             cleaned_masks.append(cleaned_labels)
+
+    if axis_mode.lower() == "scan" and any(
+        values is not None for values in minor_axis_candidates
+    ):
+        winning_index, minor_correlations = _select_minor_axis_candidate(
+            minor_axis_candidates,
+            [row["RealVentricularCavitySize"] for row in seg_stats],
+        )
+        winning_offset = float(MINOR_AXIS_FRAC_OFFSETS[winning_index])
+        winning_correlation = float(minor_correlations[winning_index])
+        for frame_index, row in enumerate(seg_stats):
+            values = minor_axis_candidates[frame_index]
+            selected_length = np.nan
+            if values is not None and len(values) == len(MINOR_AXIS_FRAC_OFFSETS):
+                selected_length = float(values[winning_index])
+            for column in (
+                "minorAxis_center",
+                "minorAxis_upper",
+                "minorAxis_lower",
+                "MinorAxis_center",
+                "MinorAxis_upper",
+                "MinorAxis_lower",
+            ):
+                row[column] = selected_length
+            row["MinorAxisSelectedOffsetFraction"] = winning_offset
+            row["MinorAxisAreaCorrelation"] = winning_correlation
+
+            segments = minor_axis_segments[frame_index]
+            if segments is None or len(segments) != len(MINOR_AXIS_FRAC_OFFSETS):
+                continue
+            start_point, end_point = segments[winning_index]
+            if not (
+                np.all(np.isfinite(start_point))
+                and np.all(np.isfinite(end_point))
+            ):
+                continue
+            cv2.line(
+                fs_frames_bgr[frame_index],
+                (int(round(start_point[0])), int(round(start_point[1]))),
+                (int(round(end_point[0])), int(round(end_point[1]))),
+                color=(0, 0, 255),
+                thickness=2,
+            )
 
     # ---- Write Excel like MATLAB (one file per group/experiment) ----
     seg_stats_df = pd.DataFrame(seg_stats)
@@ -1484,28 +1795,25 @@ def compute_segmentation_statistics(
         matlab_seg_df.to_excel(matlab_excel_file, index=False)
 
     # ---- Save FS overlay as GIF ----
-    # Duration per-frame based on RelativeTime diffs (fallback to 0.062s)
     rt = seg_stats_df["RelativeTime"].to_numpy(dtype=float)
-    if len(rt) >= 2:
-        diffs = np.diff(rt, prepend=rt[0])
-        # Replace first zero with median (or default 0.062)
-        if diffs[0] <= 0:
-            diffs[0] = (np.median(diffs[1:]) if np.any(diffs[1:] > 0) else 0.062)
-        durations = [max(1e-3, float(d)) for d in diffs]  # seconds per frame
-    else:
-        durations = [0.062] * len(rt)
-
-    # Convert BGR -> RGB for imageio
+    # Convert the OpenCV drawing buffer from BGR to RGB for Pillow output.
     fs_frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in fs_frames_bgr]
     gif_path = os.path.join(analysis_dir, f"{experiment_id}_FS.gif")
-    imageio.mimsave(gif_path, fs_frames_rgb, duration=durations)
-    # Also save a directory of PNGs
-    png_dir = os.path.join(analysis_dir, f"{experiment_id}_FS")
-    os.makedirs(png_dir, exist_ok=True)
-    png_iter = enumerate(fs_frames_rgb)
+    save_gif_with_relative_times(
+        fs_frames_rgb,
+        rt,
+        gif_path,
+        um_per_px=len_per_px,
+        scale_bar_um=50.0,
+    )
+
+    # Save unannotated individual FS visualizations in the selected format.
+    fs_dir = os.path.join(analysis_dir, "FS")
+    os.makedirs(fs_dir, exist_ok=True)
+    fs_iter = enumerate(fs_frames_rgb)
     if show_progress:
-        png_iter = tqdm(
-            png_iter,
+        fs_iter = tqdm(
+            fs_iter,
             total=len(fs_frames_rgb),
             desc=(progress_desc or f"{experiment_id} FS-export"),
             leave=False,
@@ -1513,9 +1821,14 @@ def compute_segmentation_statistics(
             dynamic_ncols=True,
         )
 
-    for i, f in png_iter:
-        png_path = os.path.join(png_dir, f"{experiment_id}_FS_{i:04d}.png")
-        imageio.imwrite(png_path, f)
+    for i, frame in fs_iter:
+        source_name = fnames[i] if fnames is not None else f"{experiment_id}_{i:04d}"
+        filename = visualization_name("FS", source_name, visualization_format)
+        save_visualization(
+            os.path.join(fs_dir, filename),
+            frame,
+            visualization_format,
+        )
     # Return as np array of shape (T, H, W, 3)
     fs_frames_rgb_np = np.stack(fs_frames_rgb, axis=0)
 
@@ -2965,6 +3278,10 @@ def combine_results(video_name: str,
     combined_df["PearsonCorr"] = sync_vals["PearsonCorr"]
     combined_df["PeakTimeDiff_SD"] = sync_vals["PeakTimeDiff_SD"]
     combined_df["AV_Delay_SD"] = sync_vals["AV_Delay_SD"]
+
+    # Report aggregate entropy values at the sample level.
+    for column, value in summarize_segmentation_uncertainty(seg_df).items():
+        combined_df[column] = value
 
     preferred_order = ["FileKey"] + [c for c in MATLAB_PERFISH_EXPORT_COLUMNS if c != "FileKey"] + [
         c for c in combined_df.columns if c not in (["FileKey"] + [c for c in MATLAB_PERFISH_EXPORT_COLUMNS if c != "FileKey"])

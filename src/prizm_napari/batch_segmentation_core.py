@@ -18,16 +18,29 @@ from tqdm import tqdm
 
 from prizm_napari.infer import PRIZMInference
 from prizm_napari.analysis import (
+    _matlab_preprocess_pdouble,
     compute_segmentation_statistics,
     compute_functional_statistics,
     compute_synchronize_analysis,
     combine_results,
     derive_matlab_series_key,
     matlab_style_perfish_dataframe,
+    parse_xml_times_and_scale,
+    save_gif_with_relative_times,
+)
+from prizm_napari.output_utils import (
+    normalize_visualization_format,
+    save_visualization,
+    segmentation_overlay,
+    to_uint8,
+    visualization_name,
 )
 
 
 VALID_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+BASE_UM_PER_PX = 0.9210
+BASE_CROP_PX = 300
+BASE_DETECT_PX = 400
 
 
 def _read_frame_fast(path: str, as_gray: bool = False) -> np.ndarray:
@@ -223,9 +236,7 @@ def _to_gray_unit(img: np.ndarray, prefer_green: bool = True) -> np.ndarray:
     arr[~np.isfinite(arr)] = 0.0
     mx = float(np.max(arr)) if arr.size else 0.0
     mn = float(np.min(arr)) if arr.size else 0.0
-    if mx > 1.0:
-        arr = arr / 255.0
-    if np.nanmax(arr) > 1.0 or np.nanmin(arr) < 0.0:
+    if mx > 1.0 or mn < 0.0:
         if mx > mn:
             arr = (arr - mn) / (mx - mn)
         else:
@@ -269,20 +280,25 @@ def _estimate_center_2stage(
     arr = np.asarray(frame)
     h, w = arr.shape[:2]
     coarse_src = _to_gray_unit(arr, prefer_green=True)
-    bw = _largest_component_mask(coarse_src > float(coarse_thresh))
+    adaptive_thresh = max(
+        float(coarse_thresh),
+        float(np.nanpercentile(coarse_src, 98.0)),
+    )
+    bw = _largest_component_mask(coarse_src > adaptive_thresh)
     c0 = _binary_centroid(bw)
     if c0 is None:
         coarse_center = (w / 2.0, h / 2.0)
     else:
         coarse_center = c0
 
-    half = int(round(crop_size / 2.0))
+    fine_roi_size = max(60, int(round(float(crop_size) * 0.375)))
+    half = int(round(fine_roi_size / 2.0))
     x1 = max(0, int(round(coarse_center[0])) - half)
     y1 = max(0, int(round(coarse_center[1])) - half)
-    x2 = min(w, x1 + int(crop_size))
-    y2 = min(h, y1 + int(crop_size))
-    x1 = max(0, x2 - int(crop_size))
-    y1 = max(0, y2 - int(crop_size))
+    x2 = min(w, x1 + fine_roi_size)
+    y2 = min(h, y1 + fine_roi_size)
+    x1 = max(0, x2 - fine_roi_size)
+    y1 = max(0, y2 - fine_roi_size)
 
     roi = arr[y1:y2, x1:x2]
     if roi.size == 0:
@@ -301,28 +317,128 @@ def _estimate_center_2stage(
     else:
         prep = np.clip((gray - j_lo) / (j_hi - j_lo), 0.0, 1.0)
 
-    bw2 = _largest_component_mask(prep > float(fine_thresh))
+    adaptive_fine_thresh = max(
+        float(fine_thresh),
+        float(np.nanpercentile(prep, 98.0)),
+    )
+    bw2 = _largest_component_mask(prep > adaptive_fine_thresh)
     c_local = _binary_centroid(bw2)
     if c_local is None:
         return coarse_center
     return (float(x1 + c_local[0]), float(y1 + c_local[1]))
 
 
-def _crop_resize_center(frame: np.ndarray, center_xy: tuple[float, float], out_size: int = 300) -> np.ndarray:
-    """Crop around a fixed center and resize to out_size x out_size (MATLAB imcrop+imresize style)."""
+def _crop_resize_center(
+    frame: np.ndarray,
+    center_xy: tuple[float, float],
+    out_size: int = BASE_CROP_PX,
+    crop_size: Optional[int] = None,
+) -> np.ndarray:
+    """Crop around a fixed center, then resize to ``out_size`` square pixels."""
     arr = np.asarray(frame)
     h, w = arr.shape[:2]
     cx, cy = float(center_xy[0]), float(center_xy[1])
-    x1 = int(round(cx - out_size / 2.0))
-    y1 = int(round(cy - out_size / 2.0))
-    x2 = x1 + int(out_size)
-    y2 = y1 + int(out_size)
+    crop_size = max(1, int(crop_size if crop_size is not None else out_size))
+    x1 = int(round(cx - crop_size / 2.0))
+    y1 = int(round(cy - crop_size / 2.0))
+    x2 = x1 + crop_size
+    y2 = y1 + crop_size
     x1c, y1c = max(0, x1), max(0, y1)
     x2c, y2c = min(w, x2), min(h, y2)
     roi = arr[y1c:y2c, x1c:x2c]
     if roi.size == 0:
         roi = arr
     return cv2.resize(roi, (int(out_size), int(out_size)), interpolation=cv2.INTER_LINEAR)
+
+
+def _valid_um_per_px(value) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
+def _scaled_crop_sizes(um_per_px: Optional[float]) -> tuple[int, int]:
+    """Return crop and detection sizes preserving the baseline physical FOV."""
+    valid_scale = _valid_um_per_px(um_per_px)
+    if valid_scale is None:
+        return BASE_CROP_PX, BASE_DETECT_PX
+    scale = BASE_UM_PER_PX / valid_scale
+    crop_px = max(1, int(round(BASE_CROP_PX * scale)))
+    detect_px = max(60, int(round(BASE_DETECT_PX * scale)))
+    return crop_px, detect_px
+
+
+def _save_input_visualizations(
+    sample_out: str,
+    frame_names: list[str],
+    cropped_frames: list[np.ndarray],
+    masks: np.ndarray,
+    output_format: str,
+) -> None:
+    """Write the document-specified cropped, preprocessing, and labeled frames."""
+    for frame_name, cropped, mask in zip(frame_names, cropped_frames, masks):
+        # The established output uses MATLAB im2gray semantics on the complete
+        # RGB crop. This visualization is deliberately independent of the
+        # model's selected segmentation channel.
+        preprocessed = to_uint8(_matlab_preprocess_pdouble(cropped))
+        outputs = (
+            ("cropped", "cropped", cropped),
+            ("preprocessing", "preprocessing", preprocessed),
+            ("masked", "labeled", segmentation_overlay(preprocessed, mask)),
+        )
+        for directory, prefix, image in outputs:
+            filename = visualization_name(prefix, frame_name, output_format)
+            save_visualization(
+                os.path.join(sample_out, directory, filename),
+                image,
+                output_format,
+            )
+
+
+def _relative_times_for_frames(
+    relative_times,
+    frame_count: int,
+    frame_interval: Optional[float],
+) -> np.ndarray:
+    """Resolve one timestamp per frame, falling back to the manual interval."""
+    if relative_times is not None:
+        resolved = np.asarray(relative_times, dtype=float).reshape(-1)
+        if resolved.size == int(frame_count):
+            return resolved
+
+    interval = _valid_um_per_px(frame_interval)
+    if interval is None:
+        interval = 0.062
+    return np.arange(int(frame_count), dtype=float) * float(interval)
+
+
+def _save_masked_gif(
+    sample_out: str,
+    video_name: str,
+    cropped_frames: list[np.ndarray],
+    masks: np.ndarray,
+    relative_times,
+    um_per_px: float,
+) -> str:
+    """Write the document-specified annotated masked GIF."""
+    masked_frames = (
+        segmentation_overlay(
+            to_uint8(_matlab_preprocess_pdouble(cropped)),
+            mask,
+        )
+        for cropped, mask in zip(cropped_frames, masks, strict=False)
+    )
+    return save_gif_with_relative_times(
+        masked_frames,
+        relative_times,
+        os.path.join(sample_out, f"{video_name}_masked.gif"),
+        um_per_px=um_per_px,
+        scale_bar_um=50.0,
+    )
 
 
 def run_batch_segmentation_core(
@@ -347,6 +463,7 @@ def run_batch_segmentation_core(
     infer_postprocess: bool = False,
     infer_batch_size: int = 1,
     use_amp: bool = True,
+    visualization_format: str = "jpg",
     progress_callback=None,
 ):
     """
@@ -354,6 +471,7 @@ def run_batch_segmentation_core(
     
     This is the exact same code that the GUI uses, extracted into a shared function.
     """
+    visualization_format = normalize_visualization_format(visualization_format)
     infer = PRIZMInference(
         model_path,
         model_type=model_type,
@@ -489,12 +607,54 @@ def run_batch_segmentation_core(
                 date_str = current_date
             video_name = f"{date_str}_{chemical_type}_{concentration}_{sample_id}"
             matlab_file_key = derive_matlab_series_key(frames, fallback=sample_id)
+
+            # Resolve acquisition scale before heart detection/cropping. The
+            # resulting 300x300 frames have an effective scale determined by
+            # the physical field of view retained in the scaled crop.
+            relative_times = None
+            unit_str = "unknown"
+            if meta_manual:
+                meta_file = None
+                original_um_per_px = _valid_um_per_px(resize_scale) or BASE_UM_PER_PX
+            else:
+                meta_file = _find_metadata_xml(
+                    sample_path=sample_path,
+                    sample_dir=sample_dir,
+                    sample_id=sample_id,
+                    chem_conc_path=chem_conc_path,
+                    metadata_file=metadata_file,
+                )
+                if meta_file:
+                    (
+                        relative_times,
+                        parsed_um_per_px,
+                        _parsed_area_per_px2,
+                        unit_str,
+                    ) = parse_xml_times_and_scale(meta_file, num_images=len(frames))
+                    original_um_per_px = (
+                        _valid_um_per_px(parsed_um_per_px) or BASE_UM_PER_PX
+                    )
+                else:
+                    original_um_per_px = BASE_UM_PER_PX
+
+            crop_px, detect_px = _scaled_crop_sizes(original_um_per_px)
+            effective_um_per_px = original_um_per_px * crop_px / BASE_CROP_PX
+            analysis_meta_info = {
+                "len_per_px": effective_um_per_px,
+                "area_per_px2": effective_um_per_px**2,
+                "unit_str": unit_str,
+                "frame_interval": frame_interval,
+                "relative_times": relative_times,
+            }
             
             sample_t0 = perf_counter()
             stage_times = {}
             emit_log(
                 f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: "
-                f"starting sample with {len(frames)} frame(s)"
+                f"starting sample with {len(frames)} frame(s) | "
+                f"source scale={original_um_per_px:.6g} um/px | "
+                f"crop={crop_px}px | detect={detect_px}px | "
+                f"normalized scale={effective_um_per_px:.6g} um/px"
             )
 
             # Stage progress: keeps progress visible during expensive post-segmentation analysis.
@@ -516,11 +676,19 @@ def run_batch_segmentation_core(
             if imgs:
                 est_center = _estimate_center_2stage(
                     imgs[0],
-                    crop_size=400,
+                    crop_size=detect_px,
                     coarse_thresh=0.10,
                     fine_thresh=0.10,
                 )
-                imgs = [_crop_resize_center(im, est_center, out_size=300) for im in imgs]
+                imgs = [
+                    _crop_resize_center(
+                        image,
+                        est_center,
+                        out_size=BASE_CROP_PX,
+                        crop_size=crop_px,
+                    )
+                    for image in imgs
+                ]
             stack = np.stack(imgs, axis=0)
             stack = dask.array.from_array(stack)
             stage_times["load_crop_s"] = perf_counter() - t0
@@ -538,7 +706,11 @@ def run_batch_segmentation_core(
                 f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: "
                 f"starting segmentation on {int(stack.shape[0])} frame(s)"
             )
-            masks = infer.infer(stack, channel)
+            masks, atrium_probabilities = infer.infer(
+                stack,
+                channel,
+                return_atrium_probabilities=True,
+            )
             stage_times["segment_s"] = perf_counter() - t0
             emit_log(
                 f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: "
@@ -562,22 +734,26 @@ def run_batch_segmentation_core(
                 stage_bar.update(1)
                 stage_bar.set_postfix(stage="save-mask", sec=f"{stage_times['save_mask_s']:.1f}")
 
-            # Metadata lookup
-            if meta_manual:
-                meta_file = None
-                meta_info = {
-                    "resize_scale": resize_scale,
-                    "frame_interval": frame_interval,
-                }
-            else:
-                meta_file = _find_metadata_xml(
-                    sample_path=sample_path,
-                    sample_dir=sample_dir,
-                    sample_id=sample_id,
-                    chem_conc_path=chem_conc_path,
-                    metadata_file=metadata_file,
-                )
-                meta_info = None
+            _save_input_visualizations(
+                sample_out,
+                frames,
+                imgs,
+                masks,
+                visualization_format,
+            )
+            gif_relative_times = _relative_times_for_frames(
+                relative_times,
+                len(frames),
+                frame_interval,
+            )
+            _save_masked_gif(
+                sample_out,
+                video_name,
+                imgs,
+                masks,
+                gif_relative_times,
+                effective_um_per_px,
+            )
 
             # 4) Segmentation statistics
             t0 = perf_counter()
@@ -587,13 +763,15 @@ def run_batch_segmentation_core(
                 masks,
                 video_name,
                 sample_out,
-                meta_file,
-                meta_info=meta_info,
+                None,
+                meta_info=analysis_meta_info,
                 frame_filenames=frames,
                 show_progress=(progress_callback is None),
                 progress_desc=f"    {sample_dir} seg-stats",
                 return_cleaned_masks=True,
                 matlab_series_key=matlab_file_key,
+                atrium_probabilities=atrium_probabilities,
+                visualization_format=visualization_format,
             )
             stage_times["seg_stats_s"] = perf_counter() - t0
             emit_log(

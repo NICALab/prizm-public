@@ -33,6 +33,7 @@ def run_batch_segmentation(
     use_metadata_xml: bool = True,
     infer_batch_size: int = 1,
     use_amp: bool = True,
+    visualization_format: str = "jpg",
 ):
     """
     Run batch segmentation and analysis on organized directory structure.
@@ -79,6 +80,7 @@ def run_batch_segmentation(
         infer_postprocess=infer_postprocess,
         infer_batch_size=infer_batch_size,
         use_amp=use_amp,
+        visualization_format=visualization_format,
         progress_callback=None,  # tqdm handles progress now
     )
     
@@ -241,6 +243,16 @@ Examples:
     )
 
     parser.add_argument(
+        '--visualization-format',
+        choices=['jpg', 'tif'],
+        default='jpg',
+        help=(
+            'Format for cropped, preprocessing, labeled, and per-frame FS '
+            'visualizations (default: jpg). Segmentation label stacks remain TIFF.'
+        ),
+    )
+
+    parser.add_argument(
         '--infer-batch-size',
         type=int,
         default=1,
@@ -313,6 +325,7 @@ Examples:
             infer_postprocess=args.infer_postprocess,
             infer_batch_size=args.infer_batch_size,
             use_amp=args.use_amp,
+            visualization_format=args.visualization_format,
         )
     except Exception as e:
         print(f"Error during batch segmentation: {e}", file=sys.stderr)

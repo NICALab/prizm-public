@@ -574,6 +574,15 @@ class PRIZMInference:
             onnx.save(model, patched_path)
             return patched_path
 
+        # A previously repaired graph may have been copied or renamed without
+        # retaining the ``.ortfixed.onnx`` suffix.  Reuse its existing Cast
+        # outputs instead of inserting duplicate producers, which would violate
+        # ONNX's single-static-assignment requirement.
+        existing_outputs = {
+            output_name
+            for existing_node in graph.node
+            for output_name in existing_node.output
+        }
         new_nodes = []
         cast_map = {}
         for node in graph.node:
@@ -582,6 +591,8 @@ class PRIZMInference:
                 original_out = node.output[0]
                 cast_out = f"{original_out}_float"
                 cast_map[original_out] = cast_out
+                if cast_out in existing_outputs:
+                    continue
                 new_nodes.append(
                     onnx_helper.make_node(
                         "Cast",
@@ -637,6 +648,51 @@ class PRIZMInference:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _class_probabilities(outputs: np.ndarray) -> np.ndarray:
+        """Convert NCHW logits (or validated probabilities) to probabilities."""
+        values = np.asarray(outputs)
+        if values.ndim != 4:
+            raise ValueError(
+                "Segmentation model output must have shape "
+                f"(batch, classes, height, width); received {values.shape}"
+            )
+        finite = np.all(np.isfinite(values))
+        looks_like_probabilities = (
+            finite
+            and np.all(values >= -1e-6)
+            and np.all(values <= 1.0 + 1e-6)
+            and np.allclose(values.sum(axis=1), 1.0, rtol=1e-4, atol=1e-5)
+        )
+        if looks_like_probabilities:
+            return values.astype(np.float32, copy=False)
+        logits = values.astype(np.float64, copy=False)
+        shifted = logits - np.max(logits, axis=1, keepdims=True)
+        exponentiated = np.exp(shifted)
+        denominator = np.sum(exponentiated, axis=1, keepdims=True)
+        if np.any(denominator <= 0) or not np.all(np.isfinite(denominator)):
+            raise ValueError("Segmentation model output cannot be converted to probabilities")
+        return (exponentiated / denominator).astype(np.float32)
+
+    def _standardize_probability_channels(self, probabilities: np.ndarray) -> np.ndarray:
+        """Return channels ordered as background, ventricle, atrium."""
+        probabilities = np.asarray(probabilities)
+        if probabilities.shape[1] != 3:
+            raise ValueError(
+                "PRIZM uncertainty output requires three model classes "
+                "(background, ventricle, atrium); "
+                f"received {probabilities.shape[1]}"
+            )
+        if self.onnx_label_remap is None:
+            return probabilities
+        remap = np.asarray(self.onnx_label_remap, dtype=int)
+        if remap.shape != (3,) or sorted(remap.tolist()) != [0, 1, 2]:
+            raise ValueError(f"Invalid ONNX label remap for uncertainty output: {remap}")
+        standardized = np.empty_like(probabilities)
+        for raw_channel, internal_label in enumerate(remap):
+            standardized[:, internal_label] = probabilities[:, raw_channel]
+        return standardized
 
     def preprocess_image(self, image, seg_ch=1) -> torch.Tensor:
         """
@@ -802,6 +858,10 @@ class PRIZMInference:
                 image_np = np.mean(image_np, axis=0)
         elif image_np.ndim != 2:
             image_np = np.squeeze(image_np)
+
+        input_scale = float(getattr(self, "onnx_input_scale", 1.0) or 1.0)
+        if input_scale > 1.0:
+            image_np = image_np / input_scale
         
         # Parameters matching MATLAB code
         min_area = 300
@@ -879,21 +939,32 @@ class PRIZMInference:
         
         return processed_seg_mask
 
-    def infer(self, image, seg_ch=1) -> np.ndarray:
+    def infer(
+        self,
+        image,
+        seg_ch=1,
+        *,
+        return_atrium_probabilities: bool = False,
+    ):
         """
         Perform inference on the input image using the loaded model.
 
         Args:
             image (np.ndarray): Input image for segmentation.
+            seg_ch (int): Source channel used for current-model preprocessing.
+            return_atrium_probabilities (bool): Also return the atrial softmax
+                probability map for uncertainty analysis.
 
         Returns:
-            np.ndarray: Segmentation output.
+            np.ndarray or tuple[np.ndarray, np.ndarray]: Segmentation labels,
+            optionally paired with per-pixel atrial probabilities.
         """
 
         # Preprocess the image
         image_tensor, h_original, w_original = self.preprocess_image(image, seg_ch)
         # image_tensor.shape = (T, 1, H, W)
         masks = []
+        atrium_probabilities = []
         
         # import pdb; pdb.set_trace()
 
@@ -927,6 +998,16 @@ class PRIZMInference:
                 outputs = outputs[..., :h_original, :w_original]
                 pred_argmax = torch.argmax(outputs, dim=1).detach().cpu().numpy()  # (B,H,W)
 
+            if return_atrium_probabilities:
+                output_values = (
+                    outputs.detach().float().cpu().numpy()
+                    if isinstance(outputs, torch.Tensor)
+                    else np.asarray(outputs)
+                )
+                probabilities = self._class_probabilities(output_values)
+                probabilities = self._standardize_probability_channels(probabilities)
+                atrium_probabilities.append(probabilities[:, 2].astype(np.float32, copy=False))
+
             if self.enable_postprocess:
                 for bi in range(pred_argmax.shape[0]):
                     pred_argmax[bi] = self.postprocess_image(image_tensor[start + bi], pred_argmax[bi])
@@ -935,5 +1016,10 @@ class PRIZMInference:
             start = end
 
         masks = np.concatenate(masks, axis=0).astype(np.uint16)
-
+        if return_atrium_probabilities:
+            atrium_probability_array = np.concatenate(
+                atrium_probabilities,
+                axis=0,
+            ).astype(np.float32, copy=False)
+            return masks, atrium_probability_array
         return masks

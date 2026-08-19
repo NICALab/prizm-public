@@ -571,54 +571,66 @@ class PRIZMBatchSegmentationQWidget(QWidget):
         layout.addWidget(QLabel("Inference Batch Size"), 15, 0)
         layout.addWidget(self.sb_infer_batch, 15, 1, 1, 2)
 
+        # Human-viewable exports follow the Word-document JPG/TIFF choice.
+        # Integer segmentation label stacks always remain lossless TIFF files.
+        self.cb_visualization_format = QComboBox()
+        self.cb_visualization_format.addItems(["jpg", "tif"])
+        self.cb_visualization_format.setCurrentText("jpg")
+        self.cb_visualization_format.setToolTip(
+            "Applies to cropped, preprocessing, labeled, and FS frame images. "
+            "Segmentation mask stacks always remain TIFF."
+        )
+        layout.addWidget(QLabel("Visualization Format"), 16, 0)
+        layout.addWidget(self.cb_visualization_format, 16, 1, 1, 2)
+
         # Postprocess masks checkbox
         self.cb_postprocess_masks = QCheckBox(
             "Postprocess masks before saving and analysis", self
         )
-        self.cb_postprocess_masks.setChecked(False)
+        self.cb_postprocess_masks.setChecked(True)
         self.cb_postprocess_masks.stateChanged.connect(
             self._on_postprocess_masks_checkbox_changed
         )
-        layout.addWidget(self.cb_postprocess_masks, 16, 0, 1, 3)
-        self.infer_postprocess = False
+        layout.addWidget(self.cb_postprocess_masks, 17, 0, 1, 3)
+        self.infer_postprocess = True
 
         # ——— Load results into viewer checkbox ———
         self.cb_load = QCheckBox("Load images and segmentations to napari", self)
         self.cb_load.setChecked(False)
         self.cb_load.stateChanged.connect(self._on_load_results_checkbox_changed)
-        layout.addWidget(self.cb_load, 17, 0, 1, 3)
+        layout.addWidget(self.cb_load, 18, 0, 1, 3)
         self.load_to_viewer = False
 
         # ——— Save analysis visulzation overlay checkbox ———
         self.cb_analysis_vis = QCheckBox("Generate analysis visualization overlay", self)
         self.cb_analysis_vis.setChecked(False)
         self.cb_analysis_vis.stateChanged.connect(self._on_save_analysis_vis_checkbox_changed)
-        layout.addWidget(self.cb_analysis_vis, 18, 0, 1, 3)
+        layout.addWidget(self.cb_analysis_vis, 19, 0, 1, 3)
         self.save_analysis_vis = False
 
         # Run/Stop button
         self.btn_run = QPushButton("Run Batch", self)
         self.btn_run.clicked.connect(self._start_batch)
-        layout.addWidget(self.btn_run, 19, 0, 1, 3)
+        layout.addWidget(self.btn_run, 20, 0, 1, 3)
         
         # Stop button (initially hidden)
         self.btn_stop = QPushButton("Stop", self)
         self.btn_stop.clicked.connect(self._stop_batch)
         self.btn_stop.setVisible(False)
-        layout.addWidget(self.btn_stop, 19, 0, 1, 3)
+        layout.addWidget(self.btn_stop, 20, 0, 1, 3)
 
         # Progress bar
         self.pbar = QProgressBar(self, minimum=0, maximum=1)
         self.pbar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        layout.addWidget(self.pbar, 20, 0, 1, 3)
+        layout.addWidget(self.pbar, 21, 0, 1, 3)
 
         # Live batch log
         self.te_batch_log = QTextEdit(self)
         self.te_batch_log.setReadOnly(True)
         self.te_batch_log.setPlaceholderText("Batch run log will appear here.")
         self.te_batch_log.setMinimumHeight(180)
-        layout.addWidget(QLabel("Batch Log"), 21, 0, 1, 3)
-        layout.addWidget(self.te_batch_log, 22, 0, 1, 3)
+        layout.addWidget(QLabel("Batch Log"), 22, 0, 1, 3)
+        layout.addWidget(self.te_batch_log, 23, 0, 1, 3)
         
         # Store worker reference and cancellation flag
         self._current_worker = None
@@ -764,6 +776,7 @@ class PRIZMBatchSegmentationQWidget(QWidget):
         encoder_output_stride = self.sb_out_stride.value()
         input_channels = self.sb_input_channels.value()
         infer_batch_size = self.sb_infer_batch.value()
+        visualization_format = self.cb_visualization_format.currentText()
         try:
             atrous_rates = [int(r) for r in self.le_atrous.text().split()]
         except ValueError:
@@ -831,6 +844,7 @@ class PRIZMBatchSegmentationQWidget(QWidget):
                     save_analysis_vis=self.save_analysis_vis,
                     infer_postprocess=self.infer_postprocess,
                     infer_batch_size=infer_batch_size,
+                    visualization_format=visualization_format,
                     progress_callback=progress_callback,
                 )
                 progress_queue.put(('done', None))
@@ -939,7 +953,8 @@ class PRIZMBatchSegmentationQWidget(QWidget):
             f"Channel Mode: {self.cb_image_mode.currentText()} | "
             f"Channel: {'grayscale' if self.grayscale else self.le_channel.text()} | "
             f"Input Channels: {self.sb_input_channels.value()} | "
-            f"Inference Batch Size: {self.sb_infer_batch.value()}"
+            f"Inference Batch Size: {self.sb_infer_batch.value()} | "
+            f"Visualization Format: {self.cb_visualization_format.currentText()}"
         )
         if self.meta_manual:
             self._append_batch_log(
