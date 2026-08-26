@@ -1,8 +1,8 @@
 """
 Authoritative PRIZM MoA 2-stage analysis implementation.
 
-This module preserves the March 7, 2026 MATLAB-aligned behavior while also
-serving as the public package entrypoint used by the GUI, CLI, and scripts.
+This module implements the validated PRIZM two-stage MoA workflow used by the
+GUI, CLI, and scripts.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import FormatStrFormatter, ScalarFormatter
+from scipy import linalg
 from scipy.stats import t
 import statsmodels.api as sm
 from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
@@ -30,6 +32,10 @@ from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
 from prizm_napari.input_discovery import discover_perfish_workbooks
+
+
+# Use the font family established for PRIZM figure exports.
+plt.rcParams["font.family"] = "Nimbus Sans"
 
 
 def list_excel_files(folder: str | Path) -> List[Path]:
@@ -52,7 +58,7 @@ def _sorted_unique(items: Sequence[str]) -> List[str]:
     return list(np.unique(np.asarray(items, dtype=object)))
 
 
-def _matlab_stratified_kfold(labels: Sequence[object], k: int, rng_seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+def _stratified_kfold(labels: Sequence[object], k: int, rng_seed: int) -> List[Tuple[np.ndarray, np.ndarray]]:
     y = np.asarray(labels, dtype=object).reshape(-1)
     rng = np.random.RandomState(int(rng_seed))
     test_folds: List[List[int]] = [[] for _ in range(int(k))]
@@ -302,6 +308,18 @@ def nan2zero(z: np.ndarray) -> np.ndarray:
     return out
 
 
+def threshold_mask(score: Sequence[float], threshold: float, atol: float = 1e-6) -> np.ndarray:
+    """Apply stable thresholding at saturated zero/one probabilities.
+
+    Logistic solvers can represent a separated probability as exactly 1 or as
+    1 minus a few billionths. Treating those as different classes is a numerical
+    artifact, not an analysis choice.
+    """
+    values = np.asarray(score, dtype=float).reshape(-1)
+    thr = float(threshold)
+    return (values >= thr) | np.isclose(values, thr, rtol=0.0, atol=float(atol))
+
+
 def feature_mask(x: np.ndarray, missing_frac_max: float) -> np.ndarray:
     keep = np.mean(~np.isfinite(x), axis=0) <= float(missing_frac_max)
     if np.any(keep):
@@ -385,19 +403,34 @@ def sheet31(name: str) -> str:
     return s[:31]
 
 
+def _save_rgb_png(fig: plt.Figure, path: str | Path, dpi: int) -> None:
+    """Save an opaque RGB PNG with deterministic color channels."""
+    path = Path(path)
+    fig.savefig(path, dpi=dpi, facecolor="white")
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.convert("RGB").save(path, dpi=(dpi, dpi))
+    except Exception:
+        pass
+
+
 class _GLMBinomialWrapper:
-    def __init__(self, result: object):
+    def __init__(self, result: object, exog_columns: Sequence[int], n_input_features: int):
         self.result = result
+        self.exog_columns = np.asarray(exog_columns, dtype=int)
+        self.n_input_features = int(n_input_features)
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
-        p = _predict_binomial_glm(self.result, x)
+        p = _predict_binomial_glm(self, x)
         return np.column_stack([1.0 - p, p])
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         return (self.predict_proba(x)[:, 1] >= 0.5).astype(int)
 
 
-class _PlattCalibratedBinarySVM:
+class _PosteriorCalibratedBinarySVM:
     def __init__(
         self,
         kernel: str,
@@ -411,37 +444,55 @@ class _PlattCalibratedBinarySVM:
         self.rbf_gamma_factor = float(rbf_gamma_factor)
         self.base_model: Optional[SVC] = None
         self.calibrator: Optional[_GLMBinomialWrapper] = None
+        self.use_step_transform = False
+        self.lower_score = -np.inf
+        self.upper_score = np.inf
 
-    def fit(self, x: np.ndarray, y: np.ndarray, sample_weight: np.ndarray) -> "_PlattCalibratedBinarySVM":
+    def fit(self, x: np.ndarray, y: np.ndarray, sample_weight: np.ndarray) -> "_PosteriorCalibratedBinarySVM":
         x = np.asarray(x, dtype=float)
         ybin = np.asarray(y, dtype=bool).reshape(-1)
         w = np.asarray(sample_weight, dtype=float).reshape(-1)
         kwargs = {
             "kernel": self.kernel,
-            "probability": False,
             "C": self.c_value,
         }
         if self.kernel.lower() == "rbf":
-            kwargs["gamma"] = _rbf_gamma_like_matlab_auto(x, self.rbf_gamma_factor)
+            kwargs["gamma"] = _rbf_gamma_from_feature_scale(x, self.rbf_gamma_factor)
         self.base_model = SVC(**kwargs)
         self.base_model.fit(x, ybin.astype(int), sample_weight=w)
-        score = np.asarray(self.base_model.decision_function(x), dtype=float).reshape(-1, 1)
-        # MATLAB's fitPosterior behavior is materially closer when the sigmoid
-        # calibration itself is not reweighted, even though the upstream SVM
-        # fit still uses the class-balance weights.
-        calib_w = np.ones_like(w)
-        self.calibrator = _fit_binomial_glm_classifier(score, ybin, calib_w)
+        score = np.asarray(self.base_model.decision_function(x), dtype=float).reshape(-1)
+        self.lower_score = float(np.max(score[~ybin]))
+        self.upper_score = float(np.min(score[ybin]))
+        self.use_step_transform = self.lower_score <= self.upper_score
+        if self.use_step_transform:
+            # With complete separation, retain the SVM step transform: zero
+            # below the negative-class boundary, one above the positive-class
+            # boundary, and 0.5 in the separating interval.
+            self.calibrator = None
+        else:
+            # For overlapping scores, fitPosterior uses a sigmoid posterior.
+            # Its calibration call is unweighted even though the SVM itself is
+            # class weighted, so preserve that distinction here.
+            self.calibrator = _fit_binomial_glm_classifier(
+                score.reshape(-1, 1),
+                ybin,
+                np.ones_like(w),
+            )
         return self
 
     def decision_function(self, x: np.ndarray) -> np.ndarray:
         return np.asarray(self.base_model.decision_function(np.asarray(x, dtype=float)), dtype=float).reshape(-1)
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
-        score = self.decision_function(x).reshape(-1, 1)
-        if self.calibrator is None:
-            p = 1.0 / (1.0 + np.exp(-np.clip(score.reshape(-1), -700.0, 700.0)))
+        score = self.decision_function(x)
+        if self.use_step_transform:
+            p = np.full(score.shape, 0.5, dtype=float)
+            p[score <= self.lower_score] = 0.0
+            p[score >= self.upper_score] = 1.0
+        elif self.calibrator is not None:
+            p = self.calibrator.predict_proba(score.reshape(-1, 1))[:, 1]
         else:
-            p = self.calibrator.predict_proba(score)[:, 1]
+            p = 1.0 / (1.0 + np.exp(-np.clip(score, -700.0, 700.0)))
         return np.column_stack([1.0 - p, p])
 
     def predict(self, x: np.ndarray) -> np.ndarray:
@@ -508,7 +559,7 @@ class _DiagLinearDiscriminantBinary:
 
 
 class _WeightedBootstrapBagBinary:
-    """Approximate MATLAB TreeBagger classification with weighted bootstraps."""
+    """Bagged binary classifier using weighted bootstrap samples."""
 
     def __init__(
         self,
@@ -571,30 +622,55 @@ def _fit_binomial_glm_classifier(x: np.ndarray, ybin: np.ndarray, sample_weight:
     xx = np.asarray(x, dtype=float)
     yy = np.asarray(ybin, dtype=bool).astype(float).reshape(-1)
     ww = np.asarray(sample_weight, dtype=float).reshape(-1)
-    exog = sm.add_constant(xx, has_constant="add")
+    exog_full = sm.add_constant(xx, has_constant="add")
+    # Determine rank from x multiplied by prior weights—not from the unweighted
+    # design or square-root weights—before IRLS.
+    # This detail changes which aliased columns survive when p >= n.  Selecting
+    # pivots from the unweighted design can therefore reverse saturated 0/1
+    # predictions even though both fits use the same observations and weights.
+    # Apply weighted rank-revealing QR before fitting with statsmodels.
+    rank_design = exog_full * ww[:, None]
+    _, rmat, piv = linalg.qr(rank_design, mode="economic", pivoting=True)
+    diag = np.abs(np.diag(rmat))
+    scale = float(diag[0]) if len(diag) else 0.0
+    tol = max(exog_full.shape) * np.finfo(float).eps * scale
+    rank = int(np.sum(diag > tol))
+    if rank <= 0:
+        selected = np.asarray([0], dtype=int)
+    else:
+        selected = np.sort(np.asarray(piv[:rank], dtype=int))
+    exog = exog_full[:, selected]
     model = sm.GLM(yy, exog, family=sm.families.Binomial(), freq_weights=ww)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             warnings.simplefilter("ignore", category=PerfectSeparationWarning)
-            result = model.fit(maxiter=200, disp=0)
+            # Use 100 iterations and a 1e-6 coefficient tolerance. Deviance-based
+            # early stopping leaves separated fits less saturated and can change
+            # a threshold of exactly 1.0 into a different class decision.
+            result = model.fit(maxiter=100, tol=1e-6, tol_criterion="params", disp=0)
     except Exception:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             warnings.simplefilter("ignore", category=PerfectSeparationWarning)
             result = model.fit_regularized(alpha=1e-8, L1_wt=0.0, maxiter=200)
-    return _GLMBinomialWrapper(result)
+    return _GLMBinomialWrapper(result, selected, xx.shape[1])
 
 
 def _predict_binomial_glm(result: object, x: np.ndarray) -> np.ndarray:
-    exog = sm.add_constant(np.asarray(x, dtype=float), has_constant="add")
+    xx = np.asarray(x, dtype=float)
+    exog = sm.add_constant(xx, has_constant="add")
+    selected = getattr(result, "exog_columns", None)
+    fitted_result = getattr(result, "result", result)
+    if selected is not None:
+        exog = exog[:, np.asarray(selected, dtype=int)]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        p = np.asarray(result.predict(exog), dtype=float).reshape(-1)
+        p = np.asarray(fitted_result.predict(exog), dtype=float).reshape(-1)
     return np.clip(p, 0.0, 1.0)
 
 
-def _rbf_gamma_like_matlab_auto(x: np.ndarray, factor: float = 1.0) -> float | str:
+def _rbf_gamma_from_feature_scale(x: np.ndarray, factor: float = 1.0) -> float | str:
     xx = np.asarray(x, dtype=float)
     if xx.ndim != 2 or xx.shape[1] == 0:
         return "scale"
@@ -660,18 +736,18 @@ def train_stage1_bin(x: np.ndarray, ybin: np.ndarray, mode: str, rng_seed: int) 
     if mode == "logi_glm":
         mdl = _fit_binomial_glm_classifier(x, ybin, w)
     elif mode == "svm_linear":
-        mdl = _PlattCalibratedBinarySVM(
+        mdl = _PosteriorCalibratedBinarySVM(
             kernel="linear",
             rng_seed=rng_seed,
             c_value=1.0,
             rbf_gamma_factor=1.0,
         ).fit(x, ybin, w)
     elif mode == "svm_rbf":
-        mdl = _PlattCalibratedBinarySVM(
+        mdl = _PosteriorCalibratedBinarySVM(
             kernel="rbf",
             rng_seed=rng_seed,
-            c_value=2.0,
-            rbf_gamma_factor=2.5,
+            c_value=1.0,
+            rbf_gamma_factor=1.0,
         ).fit(x, ybin, w)
     else:
         raise ValueError(f"Unknown Stage1 mode: {mode}")
@@ -734,7 +810,7 @@ def train_ovr_model(x: np.ndarray, y: np.ndarray, mode: str, opts: Dict) -> Dict
         if mode == "logi_glm":
             mdl = _fit_binomial_glm_classifier(xt, ybin.astype(bool), w)
         elif mode == "svm_linear":
-            mdl = _PlattCalibratedBinarySVM(
+            mdl = _PosteriorCalibratedBinarySVM(
                 kernel="linear",
                 rng_seed=int(opts["rngSeed"]),
                 c_value=1.0,
@@ -743,11 +819,11 @@ def train_ovr_model(x: np.ndarray, y: np.ndarray, mode: str, opts: Dict) -> Dict
                 xt, ybin.astype(bool), w
             )
         elif mode == "svm_rbf":
-            mdl = _PlattCalibratedBinarySVM(
+            mdl = _PosteriorCalibratedBinarySVM(
                 kernel="rbf",
                 rng_seed=int(opts["rngSeed"]),
-                c_value=2.0,
-                rbf_gamma_factor=2.5,
+                c_value=1.0,
+                rbf_gamma_factor=1.0,
             ).fit(
                 xt, ybin.astype(bool), w
             )
@@ -913,7 +989,7 @@ def cv_stage1_models(stage1_models: List[Dict], x: np.ndarray, y: np.ndarray, op
     if len(counts) < 2 or int(np.min(counts)) < 2:
         raise ValueError("Stage1 CV requires at least two samples in both Vehicle and Toxic classes.")
     k = min(int(opts["kfold"]), int(np.min(counts)))
-    splits = _matlab_stratified_kfold(ybin.astype(object), k, int(opts["rngSeed"]))
+    splits = _stratified_kfold(ybin.astype(object), k, int(opts["rngSeed"]))
 
     report_rows = []
     oof_pack = []
@@ -962,7 +1038,7 @@ def cv_stage2_models_ovr(
         return pd.DataFrame(), pd.DataFrame(), []
 
     k = min(int(opts["kfold"]), int(np.min(counts)))
-    splits = _matlab_stratified_kfold(np.asarray(y, dtype=object), k, int(opts["rngSeed"]))
+    splits = _stratified_kfold(np.asarray(y, dtype=object), k, int(opts["rngSeed"]))
 
     report_rows = []
     auc_rows = []
@@ -1033,7 +1109,7 @@ def cv_end2end_fixed_stage1(
         return pd.DataFrame(), pd.DataFrame(), []
 
     k = min(int(opts["kfold"]), int(np.min(counts)))
-    splits = _matlab_stratified_kfold(np.asarray(y, dtype=object), k, int(opts["rngSeed"]))
+    splits = _stratified_kfold(np.asarray(y, dtype=object), k, int(opts["rngSeed"]))
 
     s1_hits = [m for m in stage1_models if m["id"] == opts["stage1FinalID"]]
     s1_mode = s1_hits[0]["mode"] if s1_hits else stage1_models[0]["mode"]
@@ -1071,7 +1147,7 @@ def cv_end2end_fixed_stage1(
                 s[:, 1 + ci] = p_tox * p2[:, ci]
 
             final_pred = np.full((len(p_tox),), "Vehicle", dtype=object)
-            toxic_idx = np.where(p_tox >= thr)[0]
+            toxic_idx = np.where(threshold_mask(p_tox, thr))[0]
             if len(toxic_idx):
                 best = np.argmax(s[toxic_idx, 1:], axis=1)
                 final_pred[toxic_idx] = tox_classes[best]
@@ -1125,32 +1201,46 @@ def cv_end2end_fixed_stage1(
 
 def make_info_table(train_spec: pd.DataFrame, unknown_files: Sequence[Path], bundle: Dict, out_dir: str | Path) -> pd.DataFrame:
     opts = bundle["opts"]
-    return pd.DataFrame(
-        [
+    row = {
+        "OutputFolder": str(out_dir),
+        "TrainFiles": int(len(train_spec)),
+        "VehicleFiles": int(np.sum(train_spec["Group"] == "Vehicle")),
+        "UnknownFiles": int(len(unknown_files)),
+        "UseRobust": bool(opts["useRobustControlStats"]),
+        "ClipZ": float(opts["clipZ"]),
+        "MissingFracMax": float(opts["missingFracMax"]),
+        "MinMatchFrac": float(opts["minMatchFrac"]),
+        "TargetFPR": float(opts["targetFPR"]),
+        "Stage1_FinalID": str(opts["stage1FinalID"]),
+        "Stage1_Threshold": float(bundle["stage1"]["threshold"]),
+        "SaveTOSTvsSelf": bool(opts.get("saveTOSTvsSelf", False)),
+        "TOST_Alpha": float(opts["tostAlpha"]) if opts.get("tostAlpha") is not None else np.nan,
+        "TOST_DeltaSoftmax": float(opts["tostDeltaSoftmax"])
+        if opts.get("tostDeltaSoftmax") is not None
+        else np.nan,
+        "TOST_DeltaDistance": float(opts["tostDeltaDistance"])
+        if opts.get("tostDeltaDistance") is not None
+        else np.nan,
+        "IncludeSelfInSimilarity": bool(opts.get("includeSelfInSimilarity", False)),
+        "SelfSimilarityLabel": str(opts.get("selfSimilarityLabel", "")),
+        "Timestamp": str(pd.Timestamp.now()),
+    }
+    if bool(opts.get("saveDominanceStats", False)) or bool(opts.get("saveDominanceStatsML", False)):
+        row.update(
             {
-                "OutputFolder": str(out_dir),
-                "TrainFiles": int(len(train_spec)),
-                "VehicleFiles": int(np.sum(train_spec["Group"] == "Vehicle")),
-                "UnknownFiles": int(len(unknown_files)),
-                "UseRobust": bool(opts["useRobustControlStats"]),
-                "ClipZ": float(opts["clipZ"]),
-                "MissingFracMax": float(opts["missingFracMax"]),
-                "MinMatchFrac": float(opts["minMatchFrac"]),
-                "TargetFPR": float(opts["targetFPR"]),
-                "Stage1_FinalID": str(opts["stage1FinalID"]),
-                "Stage1_Threshold": float(bundle["stage1"]["threshold"]),
                 "SaveDominanceStats": bool(opts.get("saveDominanceStats", False)),
                 "SaveDominanceStatsML": bool(opts.get("saveDominanceStatsML", False)),
-                "Dominance_Alpha": float(opts["dominanceAlpha"]) if opts.get("dominanceAlpha") is not None else np.nan,
+                "Dominance_Alpha": float(opts["dominanceAlpha"])
+                if opts.get("dominanceAlpha") is not None
+                else np.nan,
                 "ExcludeSelfInDominance": bool(opts.get("excludeSelfInDominance", True)),
                 "PERM_N": int(opts["permN"]) if opts.get("permN") is not None else np.nan,
-                "PERM_MaxExactN": int(opts["permMaxExactN"]) if opts.get("permMaxExactN") is not None else np.nan,
-                "IncludeSelfInSimilarity": bool(opts.get("includeSelfInSimilarity", False)),
-                "SelfSimilarityLabel": str(opts.get("selfSimilarityLabel", "")),
-                "Timestamp": str(pd.Timestamp.now()),
+                "PERM_MaxExactN": int(opts["permMaxExactN"])
+                if opts.get("permMaxExactN") is not None
+                else np.nan,
             }
-        ]
-    )
+        )
+    return pd.DataFrame([row])
 
 
 def _save_bundle(bundle_path: str | Path, bundle: Dict) -> None:
@@ -1158,9 +1248,21 @@ def _save_bundle(bundle_path: str | Path, bundle: Dict) -> None:
         pickle.dump(bundle, f)
 
 
+class _BundleUnpickler(pickle.Unpickler):
+    """Load bundles written before internal classifier names were modernized."""
+
+    def find_class(self, module: str, name: str):
+        if (
+            module == "prizm_napari.moa_analysis"
+            and name == "_MatlabPosteriorBinarySVM"
+        ):
+            return _PosteriorCalibratedBinarySVM
+        return super().find_class(module, name)
+
+
 def _load_bundle(bundle_path: str | Path) -> Dict:
     with open(bundle_path, "rb") as f:
-        return pickle.load(f)
+        return _BundleUnpickler(f).load()
 
 
 def similarity_tables(
@@ -1633,7 +1735,7 @@ def predict_unknown_2stage(
 
     p_final = p_map[str(opts["stage1FinalID"])]
     thr1 = float(bundle["stage1"]["threshold"])
-    is_toxic = p_final >= thr1
+    is_toxic = threshold_mask(p_final, thr1)
 
     sim_names, sim_means, self_label = get_similarity_refs(bundle, zu, opts)
     dist_tbl, sim_tbl, top_tbl = similarity_tables(zu, sim_names, sim_means, str(opts["simMetric"]), int(opts["simTopK"]))
@@ -1683,6 +1785,34 @@ def predict_unknown_2stage(
         sim_out.to_excel(writer, sheet_name="Similarity_Softmax", index=False)
         top_out.to_excel(writer, sheet_name="Similarity_TopK", index=False)
 
+        # Preserve the established PRIZM workbook contract.
+        if bool(opts.get("saveTOSTvsSelf", False)):
+            if self_label:
+                eq_soft_tbl = make_eq_vs_self_table(
+                    sim_tbl,
+                    sim_names,
+                    self_label,
+                    float(opts.get("tostDeltaSoftmax", 0.15)),
+                    float(opts.get("tostAlpha", 0.05)),
+                    float(opts.get("simMultiplier", 1.5)),
+                    "Softmax",
+                )
+                eq_dist_tbl = make_eq_vs_self_table(
+                    dist_tbl,
+                    sim_names,
+                    self_label,
+                    float(opts.get("tostDeltaDistance", 1.18)),
+                    float(opts.get("tostAlpha", 0.05)),
+                    float(opts.get("simMultiplier", 1.5)),
+                    "Distance",
+                )
+            else:
+                note = "Self reference not found. Equivalence vs Self was skipped."
+                eq_soft_tbl = pd.DataFrame({"Note": [note]})
+                eq_dist_tbl = pd.DataFrame({"Note": [note]})
+            eq_soft_tbl.to_excel(writer, sheet_name="EQ_vsSelf_Softmax", index=False)
+            eq_dist_tbl.to_excel(writer, sheet_name="EQ_vsSelf_Distance", index=False)
+
         if bool(opts.get("saveDominanceStats", False)):
             exclude_label = self_label if bool(opts.get("excludeSelfInDominance", True)) else ""
             competitor_mode = str(opts.get("dominanceCompetitorMode", "mean") or "mean")
@@ -1720,7 +1850,7 @@ def predict_unknown_2stage(
             score_tox = p_final[:, None] * p2
 
             final_label = np.full((len(p_final),), "Vehicle", dtype=object)
-            toxic_idx = np.where(p_final >= thr1)[0]
+            toxic_idx = np.where(threshold_mask(p_final, thr1))[0]
             if len(toxic_idx):
                 best = np.argmax(score_tox[toxic_idx], axis=1)
                 final_label[toxic_idx] = class_tox[best]
@@ -1776,6 +1906,229 @@ def predict_unknown_2stage(
     return out_xlsx
 
 
+_PLOT_BLUE = (0.066, 0.443, 0.745)
+_PLOT_EDGE = (33.0 / 255.0, 33.0 / 255.0, 33.0 / 255.0)
+_THRESHOLD_LINEWIDTH = 0.40
+
+
+def _style_prizm_axes(ax: plt.Axes, *, box: bool) -> None:
+    """Apply the established PRIZM axes styling."""
+    ax.grid(
+        True,
+        color=_PLOT_EDGE,
+        alpha=0.15,
+        linestyle="-",
+        linewidth=0.5,
+    )
+    ax.set_axisbelow(True)
+
+    # Use inward ticks, compact tick lengths, a 0.5-point line width, and the
+    # same dark-gray color for axes, ticks, and labels. Keep data marks above
+    # the axes lines at the boundary.
+    ax.tick_params(
+        axis="both",
+        which="major",
+        direction="in",
+        length=3.5,
+        width=0.5,
+        colors=_PLOT_EDGE,
+        top=box,
+        right=box,
+        zorder=0.5,
+    )
+    for name, spine in ax.spines.items():
+        spine.set_visible(box or name in {"left", "bottom"})
+        spine.set_color(_PLOT_EDGE)
+        spine.set_linewidth(0.5)
+        spine.set_zorder(0.5)
+
+    ax.xaxis.label.set_color(_PLOT_EDGE)
+    ax.yaxis.label.set_color(_PLOT_EDGE)
+    ax.title.set_color(_PLOT_EDGE)
+
+
+def _histogram_edges(values: Sequence[float], n_bins: int = 15) -> np.ndarray:
+    """Reproduce the bin edges selected by ``histogram(x, 15)``.
+
+    Expand a constant vector by +/-0.5. For a nonconstant vector, round the
+    nominal bin width upward to two significant digits so saturated
+    probabilities remain in stable, visible bars.
+    """
+    x = np.asarray(values, dtype=float)
+    x = x[np.isfinite(x)]
+    n_bins = max(int(n_bins), 1)
+    if x.size == 0:
+        return np.linspace(-0.5, 0.5, n_bins + 1)
+    lo = float(np.min(x))
+    hi = float(np.max(x))
+    scale = max(abs(lo), abs(hi), 1.0)
+    if hi - lo <= np.finfo(float).eps * scale * 8.0:
+        return np.linspace(lo - 0.5, lo + 0.5, n_bins + 1)
+
+    raw_width = (hi - lo) / n_bins
+    exponent = int(np.floor(np.log10(raw_width)))
+    quantum = 10.0 ** (exponent - 1)
+    width = np.ceil(raw_width / quantum - 1e-12) * quantum
+    start = np.floor(lo / width + 1e-12) * width
+    if start + n_bins * width < hi - np.finfo(float).eps * scale * 8.0:
+        start = hi - n_bins * width
+    return start + np.arange(n_bins + 1, dtype=float) * width
+
+
+def _nice_step(span: float, target_intervals: int, *, ceiling: bool = False) -> float:
+    span = float(abs(span))
+    if not np.isfinite(span) or span <= 0:
+        return 1.0
+    raw = span / max(int(target_intervals), 1)
+    magnitude = 10.0 ** np.floor(np.log10(raw))
+    normalized = raw / magnitude
+    candidates = np.asarray([1.0, 2.0, 5.0, 10.0])
+    if ceiling:
+        candidate = candidates[np.flatnonzero(candidates >= normalized - 1e-12)[0]]
+    else:
+        # Favor a step of 2 over 5 until roughly three intervals and favor the
+        # next decade for values just above 1.
+        if normalized <= 1.1:
+            candidate = 1.0
+        elif normalized <= 3.0:
+            candidate = 2.0
+        elif normalized <= 7.0:
+            candidate = 5.0
+        else:
+            candidate = 10.0
+    return float(candidate * magnitude)
+
+
+def _ticks_inside(limits: tuple[float, float], step: float) -> np.ndarray:
+    lo, hi = (float(limits[0]), float(limits[1]))
+    first = np.ceil((lo - step * 1e-9) / step) * step
+    last = np.floor((hi + step * 1e-9) / step) * step
+    if last < first:
+        return np.asarray([], dtype=float)
+    ticks = np.arange(first, last + step * 0.5, step, dtype=float)
+    ticks[np.abs(ticks) < step * 1e-10] = 0.0
+    return ticks
+
+
+def _scatter_tick_step(span: float, *, axis: str) -> float:
+    """Select major-tick spacing for the PRIZM scatter axes.
+
+    Horizontal and vertical rulers use slightly different label-density cutoffs
+    at this figure size. Keeping that distinction avoids delegating the decision
+    to Matplotlib's denser default locator.
+    """
+    span = float(abs(span))
+    if not np.isfinite(span) or span <= 0:
+        return 1.0
+    raw = span / 4.0
+    magnitude = 10.0 ** np.floor(np.log10(raw))
+    normalized = raw / magnitude
+    if axis == "y":
+        if normalized <= 1.2:
+            candidate = 1.0
+        elif normalized <= 3.0:
+            candidate = 2.0
+        elif normalized <= 5.8:
+            candidate = 5.0
+        else:
+            candidate = 10.0
+    else:
+        if normalized <= 1.1:
+            candidate = 1.0
+        elif normalized <= 2.5:
+            candidate = 2.0
+        elif normalized <= 7.0:
+            candidate = 5.0
+        else:
+            candidate = 10.0
+    return float(candidate * magnitude)
+
+
+def _histogram_axis_limits_ticks(
+    edges: np.ndarray,
+    counts: np.ndarray,
+    threshold: float,
+) -> tuple[tuple[float, float], np.ndarray, tuple[float, float], np.ndarray]:
+    hist_span = float(edges[-1] - edges[0])
+    pad = 0.05 * hist_span
+    xlim = (
+        min(float(edges[0] - pad), float(threshold)),
+        max(float(edges[-1] + pad), float(threshold)),
+    )
+    xstep = _nice_step(xlim[1] - xlim[0], 3)
+    xticks = _ticks_inside(xlim, xstep)
+
+    peak = float(np.nanmax(counts)) if np.size(counts) else 1.0
+    ystep = _nice_step(max(peak, 1.0), 4, ceiling=True)
+    yupper = max(ystep, np.ceil(peak / ystep) * ystep)
+    ylim = (0.0, float(yupper))
+    yticks = _ticks_inside(ylim, ystep)
+    return xlim, xticks, ylim, yticks
+
+
+def _scatter_axis_limits_ticks(
+    values: Sequence[float],
+    *,
+    axis: str,
+) -> tuple[tuple[float, float], np.ndarray, Optional[int]]:
+    """Calculate tick-aligned limits, ticks, and an optional exponent.
+
+    Endpoints snap to a nearby major tick only when doing so does not add a
+    large empty margin.  This is the behavior visible in the reference plots:
+    e.g. normal similarity starts at its data minimum, whereas head-direction
+    similarity legitimately starts at zero.
+    """
+    x = np.asarray(values, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return (0.0, 1.0), np.linspace(0.0, 1.0, 6), None
+    lo = float(np.min(x))
+    hi = float(np.max(x))
+    span = hi - lo
+    if span <= np.finfo(float).eps * max(abs(lo), abs(hi), 1.0) * 8.0:
+        limits = (lo - 0.5, hi + 0.5)
+        step = _nice_step(1.0, 4)
+        return limits, _ticks_inside(limits, step), None
+
+    if x.size <= 2 and axis == "x":
+        step = _nice_step(span, 3, ceiling=True)
+    else:
+        step = _scatter_tick_step(span, axis=axis)
+
+    # Similarity scores occupy [0,1]. Switch to half-unit ticks when the
+    # observed range spans almost the full interval to avoid a dense grid.
+    if axis == "x" and lo >= 0.0 and lo <= 0.05 and 0.8 < hi <= 1.0 + 1e-12:
+        step = 0.5
+    lower_tick = np.floor(lo / step + 1e-12) * step
+    upper_tick = np.ceil(hi / step - 1e-12) * step
+
+    # Keep both endpoints tight for two nearby positive values instead of
+    # manufacturing a distant zero baseline.
+    tight_two_point = x.size <= 2 and lo > 0 and lo / max(hi, np.finfo(float).tiny) > 0.20
+    if tight_two_point:
+        lower, upper = lo, hi
+    else:
+        max_snap_fraction = 0.25
+        lower = lower_tick if (lo - lower_tick) <= max_snap_fraction * span else lo
+        upper = upper_tick if (upper_tick - hi) <= max_snap_fraction * span else hi
+
+        # Target no more than five visible major ticks. If snapping both ends
+        # would create a sixth, preserve zero when it is the natural baseline;
+        # otherwise preserve the lower data endpoint.
+        snapped_ticks = _ticks_inside((float(lower), float(upper)), step)
+        if snapped_ticks.size > 5 and lower == lower_tick and upper == upper_tick:
+            if lo >= 0.0 and abs(lower_tick) <= step * 1e-9:
+                upper = hi
+            else:
+                lower = lo
+    limits = (float(lower), float(upper))
+    ticks = _ticks_inside(limits, step)
+    exponent = int(np.floor(np.log10(abs(step)))) if step else None
+    if exponent is not None and exponent > -4:
+        exponent = None
+    return limits, ticks, exponent
+
+
 def make_visual_report_2stage(
     bundle_path: str | Path,
     unknown_excel_path: str | Path,
@@ -1816,33 +2169,127 @@ def make_visual_report_2stage(
     base = Path(unknown_excel_path).stem
     fig_files = []
 
-    fig = plt.figure(figsize=(8, 5))
+    # Keep the established export canvas and plotting rules. Matching only the
+    # outer PNG dimensions would conceal different bins, limits, and ticks.
+    fig = plt.figure(figsize=(1747 / 220, 1185 / 220), facecolor="white")
     ax = fig.add_subplot(111)
-    ax.hist(p_final, bins=15)
-    ax.axvline(thr1, linestyle="--", color="k")
+    hist_edges = _histogram_edges(p_final, 15)
+    counts, _, _ = ax.hist(
+        p_final,
+        bins=hist_edges,
+        color=_PLOT_BLUE,
+        alpha=0.60,
+        edgecolor=_PLOT_EDGE,
+        linewidth=0.5,
+        zorder=2,
+    )
+    ax.axvline(
+        thr1,
+        linestyle="--",
+        color=_PLOT_EDGE,
+        # A 0.4-point line produces the established 220-dpi threshold stroke.
+        linewidth=_THRESHOLD_LINEWIDTH,
+        zorder=3,
+    )
+    threshold_text = ax.text(
+        thr1,
+        0.98,
+        "Threshold",
+        transform=ax.get_xaxis_transform(),
+        ha="left",
+        va="top",
+        rotation=90,
+        fontsize=10,
+        color=_PLOT_EDGE,
+        zorder=3,
+    )
     ax.set_xlabel("P(toxic)")
     ax.set_ylabel("Count")
-    ax.set_title(f"Stage1 P(toxic) | {base}")
-    ax.grid(True, alpha=0.3)
+    ax.set_title(
+        f"Stage1 P(toxic) | {base}",
+        fontsize=11,
+        fontweight="bold",
+        pad=3.0,
+    )
+    hist_xlim, hist_xticks, hist_ylim, hist_yticks = _histogram_axis_limits_ticks(
+        hist_edges,
+        counts,
+        thr1,
+    )
+    ax.set_xlim(hist_xlim)
+    ax.set_xticks(hist_xticks)
+    ax.set_ylim(hist_ylim)
+    ax.set_yticks(hist_yticks)
+    if np.isclose(thr1, hist_xlim[1], rtol=0.0, atol=1e-12):
+        # Hide the label when the threshold is also the upper x-limit instead
+        # of leaving partial glyphs on the image border.
+        threshold_text.set_visible(False)
+    ax.xaxis.set_major_formatter(FormatStrFormatter("%g"))
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%g"))
+    # The histogram uses boxed axes, unlike the scatter below.
+    _style_prizm_axes(ax, box=True)
+    fig.subplots_adjust(left=0.045, right=0.998, bottom=0.08, top=0.969)
+    ax.yaxis.set_label_coords(-0.026, 0.5)
     fp = out_dir / f"{base}_FIG_ptoxic.png"
-    fig.savefig(fp, dpi=220, bbox_inches="tight")
+    _save_rgb_png(fig, fp, dpi=220)
     plt.close(fig)
     fig_files.append(str(fp))
 
-    fig = plt.figure(figsize=(6.5, 5.5))
+    fig = plt.figure(figsize=(1774 / 220, 1187 / 220), facecolor="white")
     ax = fig.add_subplot(111)
     ax.scatter(
         sim_tbl[make_valid_names([g1])[0]].to_numpy(dtype=float),
         sim_tbl[make_valid_names([g2])[0]].to_numpy(dtype=float),
         s=36,
         alpha=0.65,
+        color=_PLOT_BLUE,
+        edgecolors="none",
+        linewidths=0.5,
+        zorder=3,
+        # Display complete markers when their centers lie on an automatic axes
+        # limit; Matplotlib otherwise clips half the circle.
+        clip_on=False,
     )
-    ax.grid(True, alpha=0.3)
     ax.set_xlabel(f"Sim {g1}")
-    ax.set_ylabel(f"Sim {g2}")
-    ax.set_title(f"Similarity scatter | {base}")
+    ax.set_ylabel(f"Sim {g2}", labelpad=1.0)
+    ax.set_title(
+        f"Similarity scatter | {base}",
+        fontsize=11,
+        fontweight="bold",
+        pad=3.0,
+    )
+    x_values = sim_tbl[make_valid_names([g1])[0]].to_numpy(dtype=float)
+    y_values = sim_tbl[make_valid_names([g2])[0]].to_numpy(dtype=float)
+    x_limits, x_ticks, x_exponent = _scatter_axis_limits_ticks(x_values, axis="x")
+    y_limits, y_ticks, y_exponent = _scatter_axis_limits_ticks(y_values, axis="y")
+    ax.set_xlim(x_limits)
+    ax.set_ylim(y_limits)
+    ax.set_xticks(x_ticks)
+    ax.set_yticks(y_ticks)
+    for axis_name, exponent in (("x", x_exponent), ("y", y_exponent)):
+        if exponent is not None:
+            formatter = ScalarFormatter(useMathText=True)
+            formatter.set_scientific(True)
+            formatter.set_powerlimits((exponent, exponent))
+            if axis_name == "x":
+                ax.xaxis.set_major_formatter(formatter)
+            else:
+                ax.yaxis.set_major_formatter(formatter)
+        elif axis_name == "x":
+            ax.xaxis.set_major_formatter(FormatStrFormatter("%g"))
+        else:
+            ax.yaxis.set_major_formatter(FormatStrFormatter("%g"))
+    _style_prizm_axes(ax, box=False)
+    if x_exponent is not None or y_exponent is not None:
+        # Reserve extra exterior space when a ruler exponent is displayed so
+        # the y label and outer tick label are not clipped.
+        fig.subplots_adjust(left=0.0525, right=0.984, bottom=0.085, top=0.9665)
+        ax.yaxis.set_label_coords(-0.036, 0.5)
+    else:
+        fig.subplots_adjust(left=0.044, right=0.987, bottom=0.075, top=0.969)
+        ax.yaxis.set_label_coords(-0.026, 0.5)
     fp = out_dir / f"{base}_FIG_similarity_scatter.png"
-    fig.savefig(fp, dpi=220, bbox_inches="tight")
+    _save_rgb_png(fig, fp, dpi=220)
     plt.close(fig)
     fig_files.append(str(fp))
 
@@ -1872,7 +2319,7 @@ def master_rows_2stage(
     m1 = stage1_hits[0]["M"] if stage1_hits else bundle["stage1"]["models"][0]["M"]
     p_final = predict_stage1(m1, zu)
     thr1 = float(bundle["stage1"]["threshold"])
-    is_toxic = p_final >= thr1
+    is_toxic = threshold_mask(p_final, thr1)
 
     sim_names, sim_means, self_label = get_similarity_refs(bundle, zu, opts)
     _, sim_tbl, top_tbl = similarity_tables(zu, sim_names, sim_means, str(opts["simMetric"]), max(2, int(opts["simTopK"])))
@@ -1884,8 +2331,8 @@ def master_rows_2stage(
         top1_nonself[is_self] = top_tbl.loc[is_self, "Top2_Group"].astype(str).to_numpy(dtype=object)
     top1_nonself_mode = mode_string(top1_nonself)
 
-    # MATLAB's master workbook uses the non-self nearest-group summary for known training
-    # files rather than reporting "Self" as the dominant group label.
+    # The master workbook uses the non-self nearest-group summary for known
+    # training files rather than reporting "Self" as the dominant group label.
     if str(set_tag).upper() == "TRAIN" and str(true_group).strip():
         top1_mode = top1_nonself_mode
 
@@ -1979,10 +2426,10 @@ def run_full_moa_analysis(
     tost_delta_softmax: float = 0.15,
     tost_delta_distance: float = 1.18,
     sim_multiplier: float = 1.5,
-    save_dominance_stats: bool = True,
+    save_dominance_stats: bool = False,
     dominance_alpha: float = 0.05,
     exclude_self_in_dominance: bool = True,
-    save_dominance_stats_ml: bool = True,
+    save_dominance_stats_ml: bool = False,
     dominance_competitor_mode: str = "mean",
     perm_n: int = 10000,
     perm_max_exact_n: int = 16,
@@ -2070,9 +2517,10 @@ def run_full_moa_analysis(
             end2end_report.to_excel(writer, sheet_name="End2End_CV", index=False)
         if not end2end_auc_by_class.empty:
             end2end_auc_by_class.to_excel(writer, sheet_name="End2End_AUC_ByClass", index=False)
-        info.to_excel(writer, sheet_name="Info", index=False)
     write_cm_pack(train_report_xlsx, stage2_cm_pack, "S2_")
     write_cm_pack(train_report_xlsx, end2end_cm_pack, "E2E_")
+    with pd.ExcelWriter(train_report_xlsx, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+        info.to_excel(writer, sheet_name="Info", index=False)
 
     bundle["stage1"]["models"] = train_stage1_all(stage1_models, x, y, opts)
     bundle["stage2"] = {"models": train_stage2_all(stage2_models, x_tox, y_tox, opts)}

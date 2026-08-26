@@ -47,7 +47,7 @@ def main():
     )
     parser.add_argument("--sim-top-k", type=int, default=3, help="Top-K similarity groups to report")
     parser.add_argument("--self-label", default="Self", help="Label used for the self-similarity reference")
-    parser.add_argument("--dominance-alpha", type=float, default=0.05, help="Alpha used for dominance statistics")
+    parser.add_argument("--dominance-alpha", type=float, default=0.05, help="Alpha used for optional dominance statistics")
     parser.add_argument(
         "--dominance-competitor-mode",
         choices=["mean", "top2mean", "best"],
@@ -62,24 +62,24 @@ def main():
         help="Use exact sign-flip enumeration when paired sample count is at most this value",
     )
     parser.add_argument("--perm-seed", type=int, default=0, help="Permutation RNG seed for dominance statistics")
-    parser.add_argument("--tost-alpha", type=float, default=0.05, help="Legacy no-op, retained for compatibility")
+    parser.add_argument("--tost-alpha", type=float, default=0.05, help="Alpha for equivalence testing (TOST) vs Self")
     parser.add_argument(
         "--tost-delta-softmax",
         type=float,
         default=0.15,
-        help="Legacy no-op, retained for compatibility",
+        help="Equivalence margin for similarity softmax vs Self",
     )
     parser.add_argument(
         "--tost-delta-distance",
         type=float,
         default=1.18,
-        help="Legacy no-op, retained for compatibility",
+        help="Equivalence margin for similarity distance vs Self",
     )
     parser.add_argument(
         "--sim-multiplier",
         type=float,
         default=1.5,
-        help="Legacy no-op, retained for compatibility",
+        help="Multiplier used for the TOST SIM classification",
     )
     parser.add_argument(
         "--no-figures",
@@ -97,14 +97,14 @@ def main():
         help="Disable adding the current file as a similarity reference",
     )
     parser.add_argument(
-        "--no-dominance-stats",
+        "--dominance-stats",
         action="store_true",
-        help="Disable saving similarity-based dominance statistics",
+        help="Save optional similarity dominance statistics in addition to the standard outputs",
     )
     parser.add_argument(
-        "--no-ml-dominance-stats",
+        "--ml-dominance-stats",
         action="store_true",
-        help="Disable saving ML-similarity dominance statistics",
+        help="Save optional ML-similarity dominance statistics",
     )
     parser.add_argument(
         "--include-self-in-dominance",
@@ -114,7 +114,7 @@ def main():
     parser.add_argument(
         "--no-tost-vs-self",
         action="store_true",
-        help="Legacy no-op, retained for compatibility",
+        help="Disable TOST/equivalence tables vs Self",
     )
     parser.add_argument(
         "--no-train-in-analysis",
@@ -149,10 +149,10 @@ def main():
             sim_top_k=args.sim_top_k,
             include_self_in_similarity=not args.no_self_similarity,
             self_similarity_label=args.self_label,
-            save_dominance_stats=not args.no_dominance_stats,
+            save_dominance_stats=args.dominance_stats,
             dominance_alpha=args.dominance_alpha,
             exclude_self_in_dominance=not args.include_self_in_dominance,
-            save_dominance_stats_ml=not args.no_ml_dominance_stats,
+            save_dominance_stats_ml=args.ml_dominance_stats,
             dominance_competitor_mode=args.dominance_competitor_mode,
             perm_n=args.perm_n,
             perm_max_exact_n=args.perm_max_exact_n,

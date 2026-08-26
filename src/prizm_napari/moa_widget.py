@@ -5,7 +5,6 @@ Napari widget for PRIZM 2-stage MoA prediction.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pandas as pd
 from napari.qt.threading import thread_worker
@@ -37,10 +36,6 @@ from prizm_napari.workbook_selection_dialogs import (
     GroupNameEditorDialog,
     OrderedWorkbookSelectionDialog,
 )
-
-if TYPE_CHECKING:
-    import napari
-
 
 class PRIZMMoAPredictionQWidget(QWidget):
     """
@@ -171,12 +166,22 @@ class PRIZMMoAPredictionQWidget(QWidget):
         training_row += 1
 
         self.le_tost_alpha = QLineEdit("0.05")
-        training_layout.addWidget(QLabel("Dominance Alpha"), training_row, 0)
+        training_layout.addWidget(QLabel("TOST Alpha"), training_row, 0)
         training_layout.addWidget(self.le_tost_alpha, training_row, 1, 1, 2)
         training_row += 1
 
-        self.le_sim_multiplier = QLineEdit("16")
-        training_layout.addWidget(QLabel("Permutation Max Exact N"), training_row, 0)
+        self.le_tost_delta_softmax = QLineEdit("0.15")
+        training_layout.addWidget(QLabel("TOST Delta Softmax"), training_row, 0)
+        training_layout.addWidget(self.le_tost_delta_softmax, training_row, 1, 1, 2)
+        training_row += 1
+
+        self.le_tost_delta_distance = QLineEdit("1.18")
+        training_layout.addWidget(QLabel("TOST Delta Distance"), training_row, 0)
+        training_layout.addWidget(self.le_tost_delta_distance, training_row, 1, 1, 2)
+        training_row += 1
+
+        self.le_sim_multiplier = QLineEdit("1.5")
+        training_layout.addWidget(QLabel("TOST Similarity Multiplier"), training_row, 0)
         training_layout.addWidget(self.le_sim_multiplier, training_row, 1, 1, 2)
         training_row += 1
 
@@ -216,9 +221,24 @@ class PRIZMMoAPredictionQWidget(QWidget):
         training_layout.addWidget(self.cb_outlier_train, training_row, 0, 1, 3)
         training_row += 1
 
-        self.cb_outlier_unknown = QCheckBox("Save dominance statistics", self)
-        self.cb_outlier_unknown.setChecked(True)
+        self.cb_save_tost = QCheckBox("Save equivalence (TOST) vs Self tables", self)
+        self.cb_save_tost.setChecked(True)
+        training_layout.addWidget(self.cb_save_tost, training_row, 0, 1, 3)
+        training_row += 1
+
+        self.cb_outlier_unknown = QCheckBox("Save additional Python dominance statistics", self)
+        self.cb_outlier_unknown.setChecked(False)
         training_layout.addWidget(self.cb_outlier_unknown, training_row, 0, 1, 3)
+        training_row += 1
+
+        self.cb_save_ml_dominance = QCheckBox("Save additional ML dominance statistics", self)
+        self.cb_save_ml_dominance.setChecked(False)
+        training_layout.addWidget(self.cb_save_ml_dominance, training_row, 0, 1, 3)
+        training_row += 1
+
+        self.le_dominance_alpha = QLineEdit("0.05")
+        training_layout.addWidget(QLabel("Dominance Alpha"), training_row, 0)
+        training_layout.addWidget(self.le_dominance_alpha, training_row, 1, 1, 2)
         training_row += 1
 
         self.le_outlier_top_percent = QLineEdit("mean")
@@ -229,6 +249,13 @@ class PRIZMMoAPredictionQWidget(QWidget):
         self.le_outlier_min_weight = QLineEdit("10000")
         training_layout.addWidget(QLabel("Permutation N"), training_row, 0)
         training_layout.addWidget(self.le_outlier_min_weight, training_row, 1, 1, 2)
+        training_row += 1
+
+        self.sb_perm_max_exact = QSpinBox()
+        self.sb_perm_max_exact.setRange(1, 30)
+        self.sb_perm_max_exact.setValue(16)
+        training_layout.addWidget(QLabel("Permutation Max Exact N"), training_row, 0)
+        training_layout.addWidget(self.sb_perm_max_exact, training_row, 1, 1, 2)
         training_row += 1
 
         self.btn_run = QPushButton("Run 2-Stage MoA", self)
@@ -453,13 +480,26 @@ class PRIZMMoAPredictionQWidget(QWidget):
         except ValueError:
             perm_n = 10000
         try:
-            dominance_alpha = float(self.le_tost_alpha.text())
+            tost_alpha = float(self.le_tost_alpha.text())
+        except ValueError:
+            tost_alpha = 0.05
+        try:
+            tost_delta_softmax = float(self.le_tost_delta_softmax.text())
+        except ValueError:
+            tost_delta_softmax = 0.15
+        try:
+            tost_delta_distance = float(self.le_tost_delta_distance.text())
+        except ValueError:
+            tost_delta_distance = 1.18
+        try:
+            sim_multiplier = float(self.le_sim_multiplier.text())
+        except ValueError:
+            sim_multiplier = 1.5
+        try:
+            dominance_alpha = float(self.le_dominance_alpha.text())
         except ValueError:
             dominance_alpha = 0.05
-        try:
-            perm_max_exact_n = int(float(self.le_sim_multiplier.text()))
-        except ValueError:
-            perm_max_exact_n = 16
+        perm_max_exact_n = self.sb_perm_max_exact.value()
         sim_metric = self.le_sim_metric.text().strip() or "euclid"
         self_label = self.le_self_label.text().strip() or "Self"
 
@@ -491,16 +531,16 @@ class PRIZMMoAPredictionQWidget(QWidget):
             save_dominance_stats=self.cb_outlier_unknown.isChecked(),
             dominance_alpha=dominance_alpha,
             exclude_self_in_dominance=True,
-            save_dominance_stats_ml=self.cb_outlier_unknown.isChecked(),
+            save_dominance_stats_ml=self.cb_save_ml_dominance.isChecked(),
             dominance_competitor_mode=dominance_competitor_mode,
             perm_n=perm_n,
             perm_max_exact_n=perm_max_exact_n,
             perm_seed=self.sb_rng_seed.value(),
-            save_tost_vs_self=self.cb_outlier_unknown.isChecked(),
-            tost_alpha=dominance_alpha,
-            tost_delta_softmax=0.15,
-            tost_delta_distance=1.18,
-            sim_multiplier=1.5,
+            save_tost_vs_self=self.cb_save_tost.isChecked(),
+            tost_alpha=tost_alpha,
+            tost_delta_softmax=tost_delta_softmax,
+            tost_delta_distance=tost_delta_distance,
+            sim_multiplier=sim_multiplier,
             include_train_in_analysis=self.cb_include_train.isChecked(),
             min_match_frac=min_match_frac,
         )

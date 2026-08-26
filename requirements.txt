@@ -11,6 +11,9 @@ dask
 pandas
 scipy
 matplotlib
+pillow
+imageio
+tifffile
 openpyxl
 segmentation-models-pytorch
 onnx

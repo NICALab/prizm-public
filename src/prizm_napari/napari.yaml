@@ -6,9 +6,6 @@ visibility: public
 categories: ["Annotation", "Segmentation", "Image Processing", "Measurement", "Visualization"]
 contributions:
   commands:
-    # - id: prizm-napari.make_qwidget
-    #   python_name: prizm_napari:PRIZMSegmentationQWidget
-    #   title: Make PRIZM Segmentation
     - id: prizm-napari.make_qwidget_batch
       python_name: prizm_napari:PRIZMBatchSegmentationQWidget
       title: Make PRIZM Batch Segmentation
@@ -19,8 +16,6 @@ contributions:
       python_name: prizm_napari:PRIZMMiniPanelQWidget
       title: Make PRIZM MiniPanel Heatmap/LDA
   widgets:
-    # - command: prizm-napari.make_qwidget
-    #   display_name: PRIZM Segmentation
     - command: prizm-napari.make_qwidget_batch
       display_name: PRIZM Batch Segmentation
     - command: prizm-napari.make_qwidget_moa_prediction

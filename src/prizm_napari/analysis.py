@@ -2,15 +2,12 @@ import os
 from typing import Iterable, Tuple, Optional, Sequence
 import numpy as np
 import pandas as pd
-from skimage.measure import label, regionprops, regionprops_table
 import re
 import cv2
-import torch
 import xml.etree.ElementTree as ET
 import math
 from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy import ndimage as ndi
-from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from scipy.signal import find_peaks, hilbert, peak_widths, correlate, correlation_lags, peak_prominences
@@ -19,7 +16,6 @@ from datetime import datetime
 from PIL import Image
 from tqdm import tqdm
 from pathlib import Path
-from prizm_napari.utils import *
 from prizm_napari.output_utils import (
     normalize_visualization_format,
     save_visualization,
@@ -37,7 +33,7 @@ LW_ANNOT  = 1.0           # annotation (height/width/border) lines
 GRID_LW   = 0.5
 GRID_ALPHA= 0.5
 PEAK_MS   = 5             # peak marker size
-PEAK_MARK = 'v'           # filled downward triangle (to match MATLAB vibe)
+PEAK_MARK = 'v'           # filled downward triangle
 
 # Colors: keep consistent across all figures
 COLOR_V_SIGNAL = 'b'          # ventricle signal/peaks
@@ -54,7 +50,7 @@ COLOR_CC_LAG   = 'r'
 _AX_RECT = dict(left=0.07, right=0.995, top=0.90, bottom=0.22)
 MINOR_AXIS_FRAC_OFFSETS = tuple(np.linspace(-0.15, 0.15, 9))
 
-MATLAB_FRAME_EXPORT_COLUMNS = [
+FRAME_EXPORT_COLUMNS = [
     "FileName",
     "RelativeTime",
     "VArea_px",
@@ -92,7 +88,7 @@ MATLAB_FRAME_EXPORT_COLUMNS = [
     "AtriumSegmentEntropyMean_nats",
 ]
 
-MATLAB_PERFISH_EXPORT_COLUMNS = [
+PERFISH_EXPORT_COLUMNS = [
     "FileKey",
     "V_HR_bpm",
     "A_HR_bpm",
@@ -185,7 +181,7 @@ def summarize_segmentation_uncertainty(seg_df: pd.DataFrame) -> dict[str, float 
     }
 
 
-def derive_matlab_series_key(frame_filenames: Optional[Sequence[str]], fallback: Optional[str] = None) -> str:
+def derive_series_key(frame_filenames: Optional[Sequence[str]], fallback: Optional[str] = None) -> str:
     if frame_filenames:
         first_name = str(frame_filenames[0])
         base = os.path.splitext(os.path.basename(first_name))[0]
@@ -195,7 +191,7 @@ def derive_matlab_series_key(frame_filenames: Optional[Sequence[str]], fallback:
     return str(fallback or "")
 
 
-def matlab_style_segmentation_dataframe(seg_stats_df: pd.DataFrame) -> pd.DataFrame:
+def segmentation_export_dataframe(seg_stats_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=seg_stats_df.index)
     out["FileName"] = seg_stats_df.get("FileName", pd.Series(index=seg_stats_df.index, dtype=object))
     out["RelativeTime"] = seg_stats_df.get("RelativeTime", np.nan)
@@ -234,10 +230,10 @@ def matlab_style_segmentation_dataframe(seg_stats_df: pd.DataFrame) -> pd.DataFr
     out["AtriumSegmentEntropyMean_nats"] = seg_stats_df.get(
         "AtriumSegmentEntropyMean_nats", np.nan
     )
-    return out.loc[:, MATLAB_FRAME_EXPORT_COLUMNS]
+    return out.loc[:, FRAME_EXPORT_COLUMNS]
 
 
-def matlab_style_perfish_dataframe(perfish_df: pd.DataFrame) -> pd.DataFrame:
+def perfish_export_dataframe(perfish_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=perfish_df.index)
     if "FileKey" in perfish_df.columns:
         out["FileKey"] = perfish_df["FileKey"]
@@ -245,9 +241,9 @@ def matlab_style_perfish_dataframe(perfish_df: pd.DataFrame) -> pd.DataFrame:
         out["FileKey"] = perfish_df["File Name"].map(lambda x: os.path.splitext(os.path.basename(str(x)))[0])
     else:
         out["FileKey"] = ""
-    for col in MATLAB_PERFISH_EXPORT_COLUMNS[1:]:
+    for col in PERFISH_EXPORT_COLUMNS[1:]:
         out[col] = perfish_df[col] if col in perfish_df.columns else np.nan
-    return out.loc[:, MATLAB_PERFISH_EXPORT_COLUMNS]
+    return out.loc[:, PERFISH_EXPORT_COLUMNS]
 
 # Analysis pipeline
 # stats_df, fig_v_axis, fig_a_axis, viz_data = compute_segmentation_statistics(
@@ -264,7 +260,7 @@ def matlab_style_perfish_dataframe(perfish_df: pd.DataFrame) -> pd.DataFrame:
 # )
 
 def find_ventricle_major_axis_endpoints(mask):
-    """Find the two endpoints of the ventricle's major axis using MATLAB approach"""
+    """Find ventricle major-axis endpoints with an angular boundary scan."""
     m = (mask > 0).astype(np.uint8) * 255
     cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
@@ -272,7 +268,7 @@ def find_ventricle_major_axis_endpoints(mask):
     
     # Get the largest contour
     c = max(cnts, key=cv2.contourArea)
-    if len(c) < 70:  # MATLAB uses 70 as minimum
+    if len(c) < 70:  # minimum boundary-point count
         return None, None
     
     # Get centroid
@@ -283,10 +279,10 @@ def find_ventricle_major_axis_endpoints(mask):
     cy = M["m01"] / M["m00"]
     centroid = np.array([cx, cy])
     
-    # Convert contour to boundary points (MATLAB bwboundaries equivalent)
+    # Convert the contour to boundary points.
     boundary_points = c.reshape(-1, 2)
     
-    # Test different angles (MATLAB: 65:115)
+    # Test candidate angles from 65 through 115 degrees.
     angle_range = range(65, 116)
     max_distance = -np.inf
     best_angle = np.nan
@@ -364,7 +360,7 @@ def _extract_t_index(fname: Optional[str]) -> Optional[int]:
 
 def parse_xml_times_and_scale(xml_file_path: str, num_images: int = 0):
     """
-    MATLAB-parity parser for TimeStamp + length/area scale.
+    Parse TimeStamp metadata and length/area scale.
 
     Returns
     -------
@@ -373,7 +369,7 @@ def parse_xml_times_and_scale(xml_file_path: str, num_images: int = 0):
     area_per_px2 : float
     unit_str : str
     """
-    # Fallback defaults (kept consistent with MATLAB script)
+    # Established fallback timing and scale defaults.
     relative_times = np.array([0.062 * i for i in range(max(0, int(num_images)))], dtype=float)
     len_per_px = 0.9210
     unit_str = "unknown"
@@ -443,7 +439,7 @@ def parse_xml_times_and_scale(xml_file_path: str, num_images: int = 0):
 def read_xml_properties(xml_file_path, imsize=300, num_images=0):
     """
     Backward-compatible wrapper.
-    Returns legacy pair: (resize_scale, relative_times)
+    Returns the established pair: (resize_scale, relative_times)
     """
     relative_times, len_per_px, _area_per_px2, _unit_str = parse_xml_times_and_scale(
         xml_file_path, num_images=num_images
@@ -462,7 +458,7 @@ def compute_segmentation_stats(
     axis_mode: str = "scan",  # "scan" (original) or "ellipse"
 ):
     """
-    Replicates the MATLAB measurements for a single frame AND returns an FS overlay frame.
+    Measure a single frame and return its fractional-shortening overlay.
 
     Parameters
     ----------
@@ -477,7 +473,7 @@ def compute_segmentation_stats(
         Previous frame major-axis angle in the internal 0..180 image-angle basis.
     anchor_major_angle : float | None
         First accepted major-axis angle; later frames are constrained to remain within
-        a wider anchor-centered tolerance, matching the updated MATLAB tracking logic.
+        a wider anchor-centered tracking tolerance.
     axis_mode : {"scan","ellipse"}
         "scan": original marching approach (default).
         "ellipse": estimate ventricle axes via cv2.fitEllipse and compute minor chords analytically.
@@ -519,7 +515,7 @@ def compute_segmentation_stats(
     def wrap360(x):
         return (x % 360.0 + 360.0) % 360.0
 
-    # Colors (BGR like MATLAB-ish palette)
+    # Established PRIZM BGR overlay colors.
     BLUE  = (255,   0,   0)  # vent boundary
     GREEN = (  0, 255,   0)  # atrium boundary
     RED   = (  0,   0, 255)  # vent centroid & minor axes
@@ -529,7 +525,7 @@ def compute_segmentation_stats(
     WHITE = (255, 255, 255)
 
     def largest_component(mask_bool):
-        """Return largest 8-connected component by pixel area, MATLAB regionprops-like."""
+        """Return the largest 8-connected component by pixel area."""
         if not np.any(mask_bool):
             return None
         m = mask_bool.astype(np.uint8)
@@ -558,7 +554,7 @@ def compute_segmentation_stats(
         return (filled > 0, cnt_xy, (cx, cy), (x, y, w, h), area)
 
     def longest_boundary(mask_bool):
-        """Return the longest boundary on the full mask, MATLAB bwboundaries-like."""
+        """Return the longest traced boundary on the full mask."""
         if not np.any(mask_bool):
             return None
         m = (mask_bool.astype(np.uint8) * 255)
@@ -570,7 +566,7 @@ def compute_segmentation_stats(
         if len(pts) <= 1:
             return pts
 
-        # Normalize the trace to a MATLAB-like deterministic ordering:
+        # Normalize the trace to a deterministic ordering:
         # start at the top-most/left-most boundary pixel and traverse clockwise.
         start_idx = int(np.lexsort((pts[:, 0], pts[:, 1]))[0])
         pts = np.roll(pts, -start_idx, axis=0)
@@ -604,7 +600,7 @@ def compute_segmentation_stats(
 
     def atrium_points(mask_bool):
         """
-        MATLAB parity for atriumPoints(Amask):
+        Atrium landmark selection:
         - centroid from largest-area connected component
         - top/bottom from the longest boundary on the full mask
         """
@@ -737,7 +733,7 @@ def compute_segmentation_stats(
         return (x, y), last_in
 
     def _clock_angle_deg(p_from, p_to):
-        # 12 o'clock = 0, clockwise positive (MATLAB clock-angle convention)
+        # 12 o'clock is zero and clockwise angles are positive.
         dx = float(p_to[0] - p_from[0])
         dy = float(p_to[1] - p_from[1])  # image y: down is +
         return wrap360(math.degrees(math.atan2(dx, -dy)))
@@ -814,7 +810,7 @@ def compute_segmentation_stats(
 
     def heart_vtop_abottom_distance(frame_gray, vmask, amask):
         """
-        MATLAB parity for the updated heartVtopAbottomDistance(P,...):
+        Heart-top to atrium-bottom distance measurement:
         - build whole-heart mask from thresholded preprocessing + dilated chambers
         - fill holes
         - geodesically split the whole-heart mask into ventricle/atrium regions
@@ -916,7 +912,7 @@ def compute_segmentation_stats(
         frame_img, vent_mask, atrium_mask
     )
 
-    # ---- DRAW: updated MATLAB FS overlay order ----
+    # ---- Draw the established fractional-shortening overlay order ----
     if heart_boundary is not None and len(heart_boundary) >= 3:
         smooth_heart = smooth_closed_boundary(heart_boundary, window=9)
         cv2.polylines(fs, [np.round(smooth_heart).astype(np.int32)], isClosed=True, color=WHITE, thickness=2)
@@ -1037,7 +1033,7 @@ def compute_segmentation_stats(
                     stats[f"Angle_{tag}"] = float(a_raw)
 
         else:
-            # ---- Updated MATLAB "scan" method with previous-angle + anchor tracking ----
+            # ---- Angular scan with previous-angle and anchor tracking ----
             axis_center = np.array([cx, cy], dtype=float)
             if not inside_boundary(v_contour, axis_center[0], axis_center[1]):
                 dist_in = cv2.distanceTransform(v_mask_largest.astype(np.uint8), cv2.DIST_L2, 5)
@@ -1102,7 +1098,7 @@ def compute_segmentation_stats(
                 for C in centers:
                     pos_out, pos_in = march_boundary(C, v_minor, v_contour)
                     neg_out, neg_in = march_boundary(C, -v_minor, v_contour)
-                    # Length from last-inside endpoints (parity with MATLAB)
+                    # Measure between the final in-mask endpoints.
                     length = math.hypot(pos_in[0] - neg_in[0], pos_in[1] - neg_in[1]) * len_per_px
                     minor_lengths.append(length)
                     minor_segments.append((pos_in, neg_in))
@@ -1150,7 +1146,7 @@ def compute_segmentation_stats(
 
 
 def _im2gray_unit(frame: np.ndarray) -> np.ndarray:
-    """MATLAB im2gray-like conversion to float image in [0,1]."""
+    """Convert an image to weighted grayscale floating point in [0,1]."""
     arr = np.asarray(frame)
     if arr.ndim == 3:
         if arr.shape[-1] >= 3:
@@ -1179,10 +1175,11 @@ def _im2gray_unit(frame: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0.0, 1.0)
 
 
-def _matlab_preprocess_pdouble(frame: np.ndarray) -> np.ndarray:
+def _preprocess_refinement_frame(frame: np.ndarray) -> np.ndarray:
     """
-    MATLAB parity preprocessing used for segmentation refinement:
-    G=im2gray(I); J=stretchlim(G); J(2)=0.9*J(2); P=imadjust(G,J,[]); Pdouble=im2double(P)
+    Segmentation-refinement preprocessing: weighted grayscale conversion,
+    1st/99th-percentile limits, a 0.90 high-limit multiplier, and intensity
+    rescaling to floating point in [0,1].
     """
     g = _im2gray_unit(frame)
     if g.size == 0:
@@ -1204,8 +1201,8 @@ def _to_gray_unit(frame: np.ndarray) -> np.ndarray:
     return _im2gray_unit(frame)
 
 
-def _matlab_nanstd(x: np.ndarray) -> float:
-    """MATLAB std(...,'omitnan') parity for vectors: empty->NaN, scalar->0, else sample std."""
+def _sample_nanstd(x: np.ndarray) -> float:
+    """Sample standard deviation with NaN omission: empty->NaN, scalar->0."""
     a = np.asarray(x, dtype=float).reshape(-1)
     a = a[np.isfinite(a)]
     n = int(a.size)
@@ -1217,7 +1214,7 @@ def _matlab_nanstd(x: np.ndarray) -> float:
 
 
 def _remove_small_components(mask_bool: np.ndarray, min_area: int = 300) -> np.ndarray:
-    """MATLAB bwareaopen(mask, min_area) equivalent with 8-connectivity."""
+    """Remove 8-connected components smaller than min_area pixels."""
     m = np.asarray(mask_bool, dtype=bool)
     if not np.any(m):
         return m
@@ -1258,7 +1255,7 @@ def _refine_mask_by_brightness_and_centroid(
     dist_thresh: float = 30.0,
 ) -> tuple[np.ndarray, Optional[tuple[float, float]]]:
     """
-    MATLAB parity for refineMasksByBrightnessAndCentroid:
+    Refine masks using component brightness and centroid continuity:
     - Multi-component: keep only bright-enough components.
     - Single-component: if centroid jump is large AND component is dark, drop it.
     """
@@ -1292,7 +1289,7 @@ def _refine_mask_by_brightness_and_centroid(
                 dark_ratio = float(np.mean(frame_gray_unit[pix] < float(dark_th))) if np.any(pix) else 1.0
                 if dark_ratio >= float(p_th):
                     m = np.zeros_like(m, dtype=bool)
-        # MATLAB updates prev centroid even when the component is dropped.
+        # Retain the current centroid even when the component is dropped.
         return m, cur
 
     return m, prev_centroid_xy
@@ -1304,8 +1301,8 @@ def _cleanup_frame_labels(
     prev_v_centroid: Optional[tuple[float, float]],
     prev_a_centroid: Optional[tuple[float, float]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[tuple[float, float]], Optional[tuple[float, float]]]:
-    """Apply MATLAB-style mask cleanup for one frame and return cleaned labels {0,1,2}."""
-    frame_refine_unit = _matlab_preprocess_pdouble(frame_i)
+    """Clean one frame mask and return labels {0,1,2} plus tracking state."""
+    frame_refine_unit = _preprocess_refinement_frame(frame_i)
     ventricle_mask = _remove_small_components(labels == 1, min_area=300)
     atrium_mask = _remove_small_components(labels == 2, min_area=300)
     ventricle_mask, prev_v_centroid = _refine_mask_by_brightness_and_centroid(
@@ -1326,7 +1323,7 @@ def _cleanup_frame_labels(
 
 
 def _circular_mean_deg(x: np.ndarray) -> float:
-    """Mean of 0..360 degree angles with wrap handling (MATLAB circularMeanDeg parity)."""
+    """Circular mean of 0..360-degree angles with wrap handling."""
     a = np.asarray(x, dtype=float).reshape(-1)
     a = a[np.isfinite(a)]
     if a.size == 0:
@@ -1529,7 +1526,7 @@ def compute_segmentation_statistics(
     return_cleaned_masks: bool = False,
     apply_mask_cleanup: bool = True,
     frames_are_preprocessed: bool = False,
-    matlab_series_key: Optional[str] = None,
+    series_key: Optional[str] = None,
     atrium_probabilities: Optional[np.ndarray] = None,
     visualization_format: str = "jpg",
 ):
@@ -1586,7 +1583,7 @@ def compute_segmentation_statistics(
     minor_axis_candidates = []
     minor_axis_segments = []
 
-    # Track updated MATLAB major-axis state between frames in the same sample.
+    # Track major-axis state between frames in the same sample.
     prev_major_angle = None
     anchor_major_angle = None
     prev_v_centroid = None
@@ -1628,7 +1625,7 @@ def compute_segmentation_statistics(
                     prev_a_centroid,
                 ) = _cleanup_frame_labels(frame_i, labels, prev_v_centroid, prev_a_centroid)
         else:
-            frame_refine_unit = _im2gray_unit(frame_i) if frames_are_preprocessed else _matlab_preprocess_pdouble(frame_i)
+            frame_refine_unit = _im2gray_unit(frame_i) if frames_are_preprocessed else _preprocess_refinement_frame(frame_i)
             ventricle_mask = np.asarray(labels == 1, dtype=bool)
             atrium_mask = np.asarray(labels == 2, dtype=bool)
             cleaned_labels = ventricle_mask.astype(np.uint8) + 2 * atrium_mask.astype(np.uint8)
@@ -1672,12 +1669,12 @@ def compute_segmentation_statistics(
             "RealVentricularCavitySize": stats_i["RealVentricularCavitySize"],
             "AtriumCavitySize": stats_i["AtriumCavitySize"],
             "RealAtriumCavitySize": stats_i["RealAtriumCavitySize"],
-            # MATLAB-friendly aliases
+            # Backward-compatible measurement aliases.
             "VArea_px": stats_i["VentricularCavitySize"],
             "VArea_real": stats_i["RealVentricularCavitySize"],
             "AArea_px": stats_i["AtriumCavitySize"],
             "AArea_real": stats_i["RealAtriumCavitySize"],
-            # Kept in legacy order for compatibility with existing downstream files.
+            # Keep the established order for compatibility with existing downstream files.
             "VentricularCentroid_X": stats_i["VentricularCentroid"][1],
             "VentricularCentroid_Y": stats_i["VentricularCentroid"][0],
             "AtriumCentroid_X": stats_i["AtriumCentroid"][1],
@@ -1783,16 +1780,16 @@ def compute_segmentation_statistics(
                 thickness=2,
             )
 
-    # ---- Write Excel like MATLAB (one file per group/experiment) ----
+    # ---- Write one segmentation workbook per group/experiment ----
     seg_stats_df = pd.DataFrame(seg_stats)
     os.makedirs(analysis_dir, exist_ok=True)
     excel_file = os.path.join(analysis_dir, f"{experiment_id}.xlsx")
     seg_stats_df.to_excel(excel_file, index=False)
-    matlab_key = str(matlab_series_key or derive_matlab_series_key(fnames, fallback=experiment_id))
-    matlab_seg_df = matlab_style_segmentation_dataframe(seg_stats_df)
-    matlab_excel_file = os.path.join(analysis_dir, f"{matlab_key}.xlsx")
-    if os.path.abspath(matlab_excel_file) != os.path.abspath(excel_file):
-        matlab_seg_df.to_excel(matlab_excel_file, index=False)
+    series_key = str(series_key or derive_series_key(fnames, fallback=experiment_id))
+    export_segmentation_df = segmentation_export_dataframe(seg_stats_df)
+    series_excel_file = os.path.join(analysis_dir, f"{series_key}.xlsx")
+    if os.path.abspath(series_excel_file) != os.path.abspath(excel_file):
+        export_segmentation_df.to_excel(series_excel_file, index=False)
 
     # ---- Save FS overlay as GIF ----
     rt = seg_stats_df["RelativeTime"].to_numpy(dtype=float)
@@ -1846,7 +1843,7 @@ def fix_relative_time_stitch(
 ) -> np.ndarray:
     """
     Remove large jumps in relative time by stitching each detected gap to the
-    median frame interval (MATLAB fixRelativeTimeStitch parity).
+    median frame interval.
     """
     t_fix = np.asarray(time, dtype=float).reshape(-1).copy()
     if t_fix.size < 3:
@@ -1885,10 +1882,9 @@ def fix_relative_time_stitch(
     return t_fix
 
 
-def _prctile_matlab_default(x: np.ndarray, q: float) -> float:
+def _hazen_percentile(x: np.ndarray, q: float) -> float:
     """
-    MATLAB prctile default parity.
-    MATLAB default "midpoint"/legacy "exact" aligns with Hazen quantiles.
+    Compute a percentile using the Hazen quantile definition.
     """
     arr = np.asarray(x, dtype=float).reshape(-1)
     arr = arr[np.isfinite(arr)]
@@ -1918,15 +1914,15 @@ def _prctile_matlab_default(x: np.ndarray, q: float) -> float:
 
 
 def _unique_stable(time: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """MATLAB unique(x,'stable') parity: keep first occurrence, preserve order."""
+    """Return unique values in first-occurrence order."""
     arr = np.asarray(time)
     _, idx = np.unique(arr, return_index=True)
     idx = np.sort(idx)
     return arr[idx], idx
 
 
-def _matlab_colon_grid(start: float, stop: float, step: float) -> np.ndarray:
-    """Return MATLAB-style `start:step:stop` values without overshooting stop."""
+def _inclusive_step_grid(start: float, stop: float, step: float) -> np.ndarray:
+    """Return inclusive start:step:stop values without overshooting stop."""
     if not (np.isfinite(start) and np.isfinite(stop) and np.isfinite(step)) or step <= 0:
         return np.array([], dtype=float)
     if stop < start:
@@ -1935,15 +1931,15 @@ def _matlab_colon_grid(start: float, stop: float, step: float) -> np.ndarray:
     return start + step * np.arange(n_steps + 1, dtype=float)
 
 
-def _find_peaks_matlab(
+def _find_peaks_left_plateau(
     y: np.ndarray,
     distance: int | None = None,
     prominence: float | None = None,
 ) -> tuple[np.ndarray, dict]:
     """
-    MATLAB findpeaks parity for flat peaks:
-      - MATLAB chooses the lowest index of a plateau
-      - SciPy defaults to midpoint for plateaus
+    Peak detection for flat plateaus:
+      - choose the lowest index of a plateau
+      - SciPy defaults to the plateau midpoint
     """
     peaks, props = find_peaks(y, distance=distance, prominence=prominence, plateau_size=1)
     if peaks.size == 0:
@@ -1963,7 +1959,7 @@ def _find_peaks_matlab(
 
 def _auto_find_peaks(sig: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    MATLAB-style robust peak picking (autoFindPeaks in PRIZM_20260127.m).
+    Robust two-pass peak detection with adaptive prominence.
     Returns (peak_values, peak_times, peak_indices).
     """
     y = np.asarray(sig, dtype=float).reshape(-1)
@@ -1977,8 +1973,8 @@ def _auto_find_peaks(sig: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.nda
     if y_f.size == 0 or np.allclose(y_f, 0):
         return np.array([]), np.array([]), np.array([], dtype=int)
 
-    p95 = _prctile_matlab_default(y_f, 95.0)
-    p5 = _prctile_matlab_default(y_f, 5.0)
+    p95 = _hazen_percentile(y_f, 95.0)
+    p5 = _hazen_percentile(y_f, 5.0)
     sig_range = float(p95 - p5)
     if not np.isfinite(sig_range) or sig_range <= 0:
         sig_range = float(np.nanmax(y_f) - np.nanmin(y_f))
@@ -2001,7 +1997,7 @@ def _auto_find_peaks(sig: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.nda
     min_dist_samples = max(1, int(round(0.2 / max(dt_med, 1e-9))))
 
     prom1 = max(0.15 * sig_range, 3.0 * noise)
-    idx1, props1 = _find_peaks_matlab(y, distance=min_dist_samples, prominence=prom1)
+    idx1, props1 = _find_peaks_left_plateau(y, distance=min_dist_samples, prominence=prom1)
     p1 = y[idx1]
     t1 = tt[idx1]
 
@@ -2010,11 +2006,11 @@ def _auto_find_peaks(sig: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.nda
 
     prom_vals = props1.get("prominences", np.array([], dtype=float))
     prom_floor = 0.5 * float(np.nanmedian(prom_vals)) if prom_vals.size else 0.0
-    border_guess = _prctile_matlab_default(y_f, 20.0)
+    border_guess = _hazen_percentile(y_f, 20.0)
     prom_dyn = (float(np.nanmean(p1)) - border_guess) * 0.20
     prom2 = max(0.06 * sig_range, prom_dyn, prom_floor, 5.0 * noise)
 
-    idx2, _ = _find_peaks_matlab(y, distance=min_dist_samples, prominence=prom2)
+    idx2, _ = _find_peaks_left_plateau(y, distance=min_dist_samples, prominence=prom2)
     if idx2.size == 0:
         return p1, t1, idx1
     return y[idx2], tt[idx2], idx2
@@ -2059,7 +2055,7 @@ def _calc_fraction_from_peak_and_border(
     b = np.asarray(borders[:n], dtype=float)
     with np.errstate(invalid="ignore", divide="ignore"):
         vec = (p - b) / p * 100.0
-    return vec, float(np.nanmean(vec)), _matlab_nanstd(vec)
+    return vec, float(np.nanmean(vec)), _sample_nanstd(vec)
 
 
 def _hr_and_interval(locs: np.ndarray) -> tuple[float, float, float]:
@@ -2069,7 +2065,7 @@ def _hr_and_interval(locs: np.ndarray) -> tuple[float, float, float]:
         return np.nan, np.nan, np.nan
     intervals = np.diff(locs)
     mean_int = float(np.nanmean(intervals))
-    int_sd = _matlab_nanstd(intervals)
+    int_sd = _sample_nanstd(intervals)
     int_cv = float(int_sd / mean_int) if np.isfinite(mean_int) and mean_int > 0 else np.nan
     duration = locs[-1] - locs[0]
     hr = float((locs.size - 1) * 60.0 / duration) if duration > 0 else np.nan
@@ -2082,7 +2078,7 @@ def _contract_relax_speed(
     borders: np.ndarray,
     border_times: np.ndarray,
 ) -> tuple[float, float]:
-    """Average contraction/relaxation slope in MATLAB style."""
+    """Calculate average contraction and relaxation slopes."""
     n = min(len(peaks), len(peak_times), len(borders), len(border_times))
     if n < 2:
         return np.nan, np.nan
@@ -2132,7 +2128,7 @@ def _pair_nearest_peaks_monotonic(
 ) -> np.ndarray:
     """
     Monotonic one-to-one nearest peak pairing with a max time window.
-    Mirrors MATLAB pairNearestPeaksMonotonic.
+    Each peak is used at most once and pairing order remains monotonic.
     """
     tv = np.asarray(t_v, dtype=float).reshape(-1)
     ta = np.asarray(t_a, dtype=float).reshape(-1)
@@ -2170,10 +2166,10 @@ def compute_functional_statistics(
     apply_time_stitch: bool = True,
     gap_factor: float = 5.0,
     expected_duration_sec: float | None = None,
-    matlab_file_key: Optional[str] = None,
+    series_key: Optional[str] = None,
 ):
     """
-    MATLAB-aligned functional analysis with additional 2026 metrics:
+    PRIZM functional analysis with extended metrics:
     interval CV, systolic/diastolic durations, SV/CO index, major/minor ED
     ratio, contractility/relaxation speeds, and diastolic A/V ratio.
     """
@@ -2262,11 +2258,10 @@ def compute_functional_statistics(
         fig_v, fig_vfs, fig_a, fig_va = Figure(), Figure(), Figure(), Figure()
         return empty, empty.copy(), pd.DataFrame(columns=["locs"]), fig_v, fig_vfs, fig_a, fig_va
 
-    t = _matlab_colon_grid(t0, t1, dt_interp)
+    t = _inclusive_step_grid(t0, t1, dt_interp)
     y_vent = _interp(time, vent, t, method=interp_method)
     y_atr = _interp(time, atr, t, method=interp_method)
-    # MATLAB parity: minor-axis interpolation is only allowed when at least
-    # 4 finite samples exist (runFunctionalAnalysis: nnz(gM) >= 4).
+    # Minor-axis interpolation requires at least four finite samples.
     g_minor = np.isfinite(minor) & np.isfinite(time)
     if np.count_nonzero(g_minor) >= 4:
         y_minor = _interp(time[g_minor], minor[g_minor], t, method=interp_method)
@@ -2291,7 +2286,7 @@ def compute_functional_statistics(
     FS_vec, FS_mean, FS_sd = _calc_fraction_from_peak_and_border(pks_m, border_m)
 
     # --------------------------
-    # MATLAB 2026 added metrics
+    # Extended functional metrics
     # --------------------------
     systolic_mean = np.nan
     diastolic_mean = np.nan
@@ -2330,7 +2325,7 @@ def compute_functional_statistics(
 
     if len(locs_v) >= 3:
         peak_intervals = np.diff(locs_v)
-        interval_col = np.concatenate(([_matlab_nanstd(peak_intervals)], peak_intervals))
+        interval_col = np.concatenate(([_sample_nanstd(peak_intervals)], peak_intervals))
     else:
         interval_col = np.array([], dtype=float)
 
@@ -2384,10 +2379,10 @@ def compute_functional_statistics(
     a_path_xlsx = os.path.join(results_dir, f"{video_name}_result_atrium.xlsx")
     v_df.to_excel(v_path_xlsx, index=False)
     a_df.to_excel(a_path_xlsx, index=False)
-    matlab_key = str(matlab_file_key or "")
-    if matlab_key and matlab_key != video_name:
-        v_df.to_excel(os.path.join(results_dir, f"{matlab_key}_result_ventricle.xlsx"), index=False)
-        a_df.to_excel(os.path.join(results_dir, f"{matlab_key}_result_atrium.xlsx"), index=False)
+    series_key = str(series_key or "")
+    if series_key and series_key != video_name:
+        v_df.to_excel(os.path.join(results_dir, f"{series_key}_result_ventricle.xlsx"), index=False)
+        a_df.to_excel(os.path.join(results_dir, f"{series_key}_result_atrium.xlsx"), index=False)
 
     # --------------------------
     # Plotting
@@ -2635,8 +2630,8 @@ def compute_functional_statistics(
         "FS_SD": FS_sd,
         "V_ED_mean": float(np.nanmean(pks_v)) if len(pks_v) else np.nan,
         "V_ES_mean": float(np.nanmean(border_v)) if len(border_v) else np.nan,
-        "V_ED_SD": _matlab_nanstd(pks_v),
-        "V_ES_SD": _matlab_nanstd(border_v),
+        "V_ED_SD": _sample_nanstd(pks_v),
+        "V_ES_SD": _sample_nanstd(border_v),
         "SV_index_mean": sv_index_mean,
         "CO_index_mean": co_index_mean,
         "Diastolic_AtoV_ratio": diastolic_ratio,
@@ -2645,8 +2640,8 @@ def compute_functional_statistics(
         "RelaxationSpeed": r_speed,
         "A_ED_mean": float(np.nanmean(pks_a)) if len(pks_a) else np.nan,
         "A_ES_mean": float(np.nanmean(border_a)) if len(border_a) else np.nan,
-        "A_ED_SD": _matlab_nanstd(pks_a),
-        "A_ES_SD": _matlab_nanstd(border_a),
+        "A_ED_SD": _sample_nanstd(pks_a),
+        "A_ES_SD": _sample_nanstd(border_a),
         "A_ED_ES_Diff_mean": float(np.nanmean(np.asarray(pks_a[: min(len(pks_a), len(border_a))]) - np.asarray(border_a[: min(len(pks_a), len(border_a))])))
         if len(pks_a) and len(border_a)
         else np.nan,
@@ -2660,7 +2655,7 @@ def compute_functional_statistics(
 # # ===========================================================
 
 def _zscore_sample(x: np.ndarray) -> np.ndarray:
-    """Z-score with sample std (ddof=1), matching MATLAB std default."""
+    """Z-score using sample standard deviation (ddof=1)."""
     mu = np.mean(x)
     sd = np.std(x, ddof=1)
     if not np.isfinite(sd) or sd == 0:
@@ -2670,14 +2665,14 @@ def _zscore_sample(x: np.ndarray) -> np.ndarray:
 
 def _xcorr_coeff(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Cross-correlation with MATLAB 'coeff' normalization.
+    Cross-correlation normalized by both input vector norms.
     Inputs must be same-length 1D arrays.
     Returns (corr, lags) where lags run from -(N-1)..(N-1).
     """
-    # Full correlation (same definition/sign convention as MATLAB's xcorr)
+    # Full correlation with the established lag sign convention.
     raw = correlate(x, y, mode="full", method="auto")
     lags = correlation_lags(x.size, y.size, mode="full")
-    # MATLAB 'coeff' divides by sqrt(sum(x.^2) * sum(y.^2))
+    # Normalize by sqrt(sum(x^2) * sum(y^2)).
     denom = np.sqrt(np.sum(x * x) * np.sum(y * y))
     if not np.isfinite(denom) or denom <= 0:
         corr = np.full(raw.shape, np.nan, dtype=float)
@@ -2697,10 +2692,10 @@ def compute_synchronize_analysis(
     apply_time_stitch: bool = True,
     gap_factor: float = 5.0,
     expected_duration_sec: float | None = None,
-    matlab_file_key: Optional[str] = None,
+    series_key: Optional[str] = None,
 ):
     """
-    MATLAB-aligned ventricle/atrium synchrony analysis with PLV and AV-delay SD.
+    Ventricle/atrium synchrony analysis with PLV and AV-delay SD.
     """
     os.makedirs(video_out, exist_ok=True)
     sync_dir = os.path.join(video_out, "synchronize")
@@ -2807,10 +2802,9 @@ def compute_synchronize_analysis(
     else:
         pearson_corr = np.nan
 
-    # MATLAB parity: runSynchronyAnalysis uses plain findpeaks(vN, tf) and
-    # findpeaks(aN, tf) with default settings (no autoFindPeaks here).
-    v_peak_idx, _ = _find_peaks_matlab(np.asarray(vent_norm, dtype=float))
-    a_peak_idx, _ = _find_peaks_matlab(np.asarray(atr_norm, dtype=float))
+    # Synchrony peaks use the basic detector without adaptive prominence.
+    v_peak_idx, _ = _find_peaks_left_plateau(np.asarray(vent_norm, dtype=float))
+    a_peak_idx, _ = _find_peaks_left_plateau(np.asarray(atr_norm, dtype=float))
     vent_peak_times = (
         np.asarray(time_fine[v_peak_idx], dtype=float).reshape(-1)
         if v_peak_idx.size
@@ -2830,7 +2824,7 @@ def compute_synchronize_analysis(
         peak_time_diffs = _pair_nearest_peaks_monotonic(
             vent_peak_times, atr_peak_times, 0.45 * period
         )
-        std_peak_diff = _matlab_nanstd(peak_time_diffs)
+        std_peak_diff = _sample_nanstd(peak_time_diffs)
     else:
         peak_time_diffs = np.array([])
         std_peak_diff = np.nan
@@ -2848,7 +2842,7 @@ def compute_synchronize_analysis(
             if idx < vent_peak_times.size:
                 av_delays.append(float(vent_peak_times[idx] - t_a))
     av_delay_mean = float(np.nanmean(av_delays)) if len(av_delays) else np.nan
-    av_delay_sd = _matlab_nanstd(np.asarray(av_delays, dtype=float))
+    av_delay_sd = _sample_nanstd(np.asarray(av_delays, dtype=float))
 
     replace_title = video_name.replace("_", "-")
     fig_cav, ax = plt.subplots(figsize=FIGSIZE, dpi=DISPLAY_DPI)
@@ -2946,11 +2940,11 @@ def compute_synchronize_analysis(
             ]
         ).to_excel(writer, index=False, sheet_name="Summary")
 
-    matlab_key = str(matlab_file_key or "")
-    if matlab_key and matlab_key != video_name:
-        _save_svg(fig_cav, os.path.join(sync_dir, f"TimeSeries_{matlab_key}.svg"), dpi=dpi)
-        _save_svg(fig_cc, os.path.join(sync_dir, f"CrossCorrelation_{matlab_key}.svg"), dpi=dpi)
-        with pd.ExcelWriter(os.path.join(sync_dir, f"TimeSeries_{matlab_key}.xlsx"), engine="openpyxl") as writer:
+    series_key = str(series_key or "")
+    if series_key and series_key != video_name:
+        _save_svg(fig_cav, os.path.join(sync_dir, f"TimeSeries_{series_key}.svg"), dpi=dpi)
+        _save_svg(fig_cc, os.path.join(sync_dir, f"CrossCorrelation_{series_key}.svg"), dpi=dpi)
+        with pd.ExcelWriter(os.path.join(sync_dir, f"TimeSeries_{series_key}.xlsx"), engine="openpyxl") as writer:
             pd.DataFrame(
                 {
                     "Time_s": time_fine,
@@ -2977,7 +2971,7 @@ def compute_synchronize_analysis(
                 }
             ).to_excel(writer, index=False, sheet_name="Phase")
             sync_df.to_excel(writer, index=False, sheet_name="Summary")
-        with pd.ExcelWriter(os.path.join(sync_dir, f"CrossCorrelation_{matlab_key}.xlsx"), engine="openpyxl") as writer:
+        with pd.ExcelWriter(os.path.join(sync_dir, f"CrossCorrelation_{series_key}.xlsx"), engine="openpyxl") as writer:
             pd.DataFrame(
                 {
                     "Lag_samples": lags,
@@ -3000,22 +2994,22 @@ def compute_synchronize_analysis(
 def combine_results(video_name: str,
                     seg_df: pd.DataFrame,
                     v_df: pd.DataFrame,
-                    vFS_df: pd.DataFrame,   # not strictly needed, kept for API parity
+                    vFS_df: pd.DataFrame,   # retained for the existing public API
                     a_df: pd.DataFrame,
                     sync_df: pd.DataFrame,
                     video_out: str,
-                    matlab_file_key: Optional[str] = None) -> pd.DataFrame:
+                    series_key: Optional[str] = None) -> pd.DataFrame:
     """
-    Build one combined row (one video) with the exact same columns as the MATLAB
-    '기능 분석 모든 결과 하나의 파일로 정리' script and save it under <video_out>/results
+    Build one combined row per video using the established PRIZM column schema
+    and save it under <video_out>/results.
     as 'combined_results_<timestamp>.xlsx' (Sheet1).
 
     Returns
     -------
-    combined_df : pd.DataFrame  # one-row table with the MATLAB column order.
+    combined_df : pd.DataFrame  # one-row table with the PRIZM column order.
     """
     # ----------------------------
-    # Paths (mirror previous modules)
+    # Output paths shared with the other analysis modules.
     # ----------------------------
     os.makedirs(video_out, exist_ok=True)
     results_dir = os.path.join(video_out, "results")
@@ -3028,7 +3022,7 @@ def combine_results(video_name: str,
 
     def nanstd(x, ddof=1):
         x = np.asarray(x, dtype=float)
-        return _matlab_nanstd(x)
+        return _sample_nanstd(x)
 
     def valid_series(df, col):
         if col not in df.columns:
@@ -3046,12 +3040,12 @@ def combine_results(video_name: str,
         return np.nan
 
     # ----------------------------
-    # 2) Pull ventricle functional metrics from v_df (like MATLAB result_ventricle.xlsx)
+    # 2) Pull ventricle functional metrics from v_df.
     #    Columns expected (per our compute_functional_statistics):
     #      'locs','interval','peaks','Border','vEF','vFS'
     # ----------------------------
     v_locs   = valid_series(v_df, "locs")
-    v_interv = valid_series(v_df, "interval")   # MATLAB recomputes std on whole column (incl. the first SD row)
+    v_interv = valid_series(v_df, "interval")   # includes the leading interval-SD summary row
     v_peaks  = valid_series(v_df, "peaks")      # ED candidates
     v_border = valid_series(v_df, "Border")     # ES candidates
     v_vEF    = valid_series(v_df, "vEF")
@@ -3059,7 +3053,7 @@ def combine_results(video_name: str,
     func_summary = dict(v_df.attrs.get("summary_metrics", {})) if hasattr(v_df, "attrs") else {}
 
     heartrate_v = heart_rate_from_locs(v_locs)
-    sd_interval = nanstd(v_interv, ddof=1)  # MATLAB: std(...,'omitnan') → ddof=1
+    sd_interval = nanstd(v_interv, ddof=1)  # sample SD with NaN omission
 
     ED_mean = nanmean(v_peaks)
     ES_mean = nanmean(v_border)
@@ -3072,7 +3066,7 @@ def combine_results(video_name: str,
     vFS_mean = nanmean(v_vFS)
     vFS_sd   = nanstd(v_vFS, ddof=1)
 
-    # Prefer MATLAB-aligned values from functional summary when available.
+    # Prefer values from the functional summary when available.
     heartrate_v = float(func_summary.get("V_HR_bpm", heartrate_v))
     heartrate_a = float(func_summary.get("A_HR_bpm", np.nan))
     sd_interval = float(func_summary.get("Interval_SD_s", sd_interval))
@@ -3093,7 +3087,7 @@ def combine_results(video_name: str,
     A_ED_ES_diff_mean = float(func_summary.get("A_ED_ES_Diff_mean", np.nan))
 
     # ----------------------------
-    # 3) Atrium heart-rate from a_df (like MATLAB result_atrium.xlsx col1)
+    # 3) Atrium heart rate from a_df.
     #    a_df only has 'locs'
     # ----------------------------
     a_locs = valid_series(a_df, "locs")
@@ -3101,9 +3095,7 @@ def combine_results(video_name: str,
         heartrate_a = heart_rate_from_locs(a_locs)
 
     # ----------------------------
-    # 4) Geometry means from seg_df (these replace MATLAB's angleData column indices)
-    #    MATLAB used:
-    #      col11 → SV-BA (X,Y), col12 → SV-BA (Y), but in our seg_df they are:
+    # 4) Geometry means from named seg_df columns:
     #        'VentricleAtriumDistance', 'VentricleAtriumYDistance'
     #    VA Center/Bottom/Top: use named columns directly (means, omit NaNs).
     # ----------------------------
@@ -3177,7 +3169,7 @@ def combine_results(video_name: str,
         }
 
     # ----------------------------
-    # 6) Build the row (exact MATLAB header order & labels)
+    # 6) Build the row in the established header order.
     # ----------------------------
     # Format filename for chemical analysis plugin compatibility: {DATE}_{CHEMICAL_TYPE}_{CONCENTRATION}_{SESSION_ID}.csv
     # If video_name already follows this format, use it; otherwise create it
@@ -3185,7 +3177,7 @@ def combine_results(video_name: str,
         # Already in correct format
         vent_result_filename = f"{video_name}.csv"
     else:
-        # Legacy format, keep as is but change extension
+        # Preserve the established filename while changing the extension.
         vent_result_filename = f"{video_name}_result_ventricle.csv"
 
     columns = [
@@ -3228,12 +3220,12 @@ def combine_results(video_name: str,
     combined_df = pd.DataFrame([row_vals], columns=columns)
     # FileKey is the canonical sample identifier used for cross-pipeline joins.
     # Default to the original sample/video key instead of the exported ventricle
-    # filename stem so MATLAB-style names like `..._Series016` do not become
+    # filename stem so names like `..._Series016` do not become
     # `..._Series016_result_ventricle`.
-    file_key = str(matlab_file_key or video_name)
+    file_key = str(series_key or video_name)
     combined_df.insert(0, "FileKey", file_key)
 
-    # MATLAB 2026 metrics (added while preserving existing schema).
+    # Extended metrics added while preserving the existing schema.
     combined_df["V_HR_bpm"] = heartrate_v
     combined_df["A_HR_bpm"] = heartrate_a
     combined_df["Interval_SD_s"] = sd_interval
@@ -3283,8 +3275,8 @@ def combine_results(video_name: str,
     for column, value in summarize_segmentation_uncertainty(seg_df).items():
         combined_df[column] = value
 
-    preferred_order = ["FileKey"] + [c for c in MATLAB_PERFISH_EXPORT_COLUMNS if c != "FileKey"] + [
-        c for c in combined_df.columns if c not in (["FileKey"] + [c for c in MATLAB_PERFISH_EXPORT_COLUMNS if c != "FileKey"])
+    preferred_order = ["FileKey"] + [c for c in PERFISH_EXPORT_COLUMNS if c != "FileKey"] + [
+        c for c in combined_df.columns if c not in (["FileKey"] + [c for c in PERFISH_EXPORT_COLUMNS if c != "FileKey"])
     ]
     combined_df = combined_df.loc[:, preferred_order]
 
@@ -3298,106 +3290,8 @@ def combine_results(video_name: str,
     # Also save as Excel for backward compatibility
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     out_xlsx = os.path.join(results_dir, f"combined_results_{timestamp}.xlsx")
-    # Sheet name & header as in MATLAB (first row is header)
+    # Write the established sheet name and header row.
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as writer:
         combined_df.to_excel(writer, index=False, sheet_name="Sheet1")
 
     return combined_df
-
-# Main function for testing
-if __name__ == "__main__":
-    from tqdm import tqdm
-    import tifffile
-    import skimage.io as skio
-    import dask.array
-    from prizm_napari.infer import PRIZMInference
-
-    data_path = r"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\data"
-    # axis_mode = "ellipse"
-    axis_mode = "scan"
-    grayscale = True
-    if grayscale:
-        channel = 0
-    else:
-        channel = 1
-    infer = PRIZMInference(
-        r"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\pretrained_models\250725_same_params_fixed_aug_0_bs8_lr1e-3_lrschstep_opt_adam_encd3_decch256_encstr8_ldf0.3_ldp5_atr3x6x9_aug1_gpu2_slot0_run10_epoch_89.pth",        
-        # r"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\pretrained_models\model_epoch_4.pth",
-        num_classes=3,
-        backbone="resnet50",
-        encoder_depth=3,
-        decoder_channels=256,
-        encoder_output_stride=8,
-        decoder_atrous_rates=(3, 6, 9),
-    )
-
-    batch_combined_list = []
-    for video_name in tqdm(os.listdir(data_path), desc="Processing videos"):
-        # sub_path = r"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\data_single\20250521_BaP_Series025"
-        # meta_dir = r"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\data_single\20250521_BaP_Series025\metadata"
-        # video_name = "20250521_BaP_Series025"
-        sub_path = fr"{data_path}\{video_name}"
-        print(sub_path)
-
-        # Create per-video output directory
-        video_out = fr"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\test_outputs\{video_name}"
-        os.makedirs(video_out, exist_ok=True)
-
-        # Load single-frame images
-        # define which extensions you consider “images”
-        VALID_EXTS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
-
-        # list and sort only files whose lower‐cased extension is in VALID_EXTS
-        frames = sorted(
-            fn for fn in os.listdir(sub_path)
-            if os.path.splitext(fn)[1].lower() in VALID_EXTS
-        )
-        imgs = [skio.imread(os.path.join(sub_path, fn), as_gray=grayscale) for fn in frames]
-        stack = np.stack(imgs, axis=0)
-        stack = dask.array.from_array(stack)
-
-        # Run segmentation
-        masks = infer.infer(stack, channel)
-
-        # Save mask TIFF
-        mask_path = os.path.join(video_out, f"{video_name}_segmentation.tif")
-        tifffile.imwrite(mask_path, masks.astype(np.uint8))
-
-        # # Save mask TIFF
-        # mask_path = fr"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\{video_name}_ch0_segmentation.tif"
-        # masks = tifffile.imread(mask_path)
-
-        # Center crop stack and mask to 300x300
-        stack = stack[:, stack.shape[1]//2-150:stack.shape[1]//2+150, stack.shape[2]//2-150:stack.shape[2]//2+150]
-        masks = masks[:, masks.shape[1]//2-150:masks.shape[1]//2+150, masks.shape[2]//2-150:masks.shape[2]//2+150]
-
-        # Metadata lookup
-        meta_file = os.path.join(sub_path, "metadata", f"{video_name}_Properties.xml")
-
-        seg_df, fs_overlay = compute_segmentation_statistics(
-            stack, masks, f"{video_name}", video_out, meta_file, meta_info=None, axis_mode=axis_mode
-        )
-
-        v_df, vFS_df, a_df, fig_v, fig_vfs, fig_a, fig_va = compute_functional_statistics(
-            seg_df, f"{video_name}", video_out
-        )
-
-        sync_df, fig_cav, fig_cc = compute_synchronize_analysis(
-            seg_df, f"{video_name}", video_out
-        )
-
-        combined_df = combine_results(
-            f"{video_name}", seg_df, v_df, vFS_df, a_df, sync_df, video_out
-        )
-    
-        batch_combined_list.append(combined_df)
-
-    # Create one combined DataFrame for the entire batch
-    if batch_combined_list:
-        batch_combined_df = pd.concat(batch_combined_list, ignore_index=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        # Save batch combined CSV
-        batch_combined_path = fr"C:\Users\jyyka\workspace\250806-prizm-napari-for-snu\test_outputs\batch_combined_{timestamp}.csv"
-        batch_combined_df.to_csv(batch_combined_path, index=False)
-    else:
-        batch_combined_df = pd.DataFrame()

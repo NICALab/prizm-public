@@ -6,8 +6,6 @@ Command-line interface for PRIZM batch segmentation.
 import argparse
 import sys
 from pathlib import Path
-import importlib.util
-from tqdm import tqdm
 
 # Import the shared core function (no GUI dependencies)
 from prizm_napari.batch_segmentation_core import run_batch_segmentation_core
@@ -47,8 +45,6 @@ def run_batch_segmentation(
                 metadata/ (optional)
                     {SAMPLE_ID}_Properties.xml
     """
-    import os
-    
     # Convert Path objects to strings for compatibility
     root_dir = str(root_dir)
     output_dir = str(output_dir)

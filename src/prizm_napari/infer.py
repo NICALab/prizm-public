@@ -1,4 +1,3 @@
-import dask
 import dask.array as da
 import numpy as np
 import math
@@ -99,7 +98,7 @@ def _configure_onnx_cuda_dll_search_paths() -> list[str]:
     """
     Add pip-installed NVIDIA CUDA/cuDNN DLL folders to the Windows process.
 
-    This mirrors the manual workaround:
+    This automates the manual workaround:
     `%CONDA_PREFIX%\\Lib\\site-packages\\nvidia\\...\\bin` prepended to PATH.
     It is intentionally a no-op on non-Windows platforms.
     """
@@ -547,8 +546,8 @@ class PRIZMInference:
 
     def _prepare_onnx_model(self, model_path: str) -> str:
         """
-        Patch MATLAB-exported ONNX crop subgraphs that mix int64 Shape outputs
-        with float arithmetic. The patched file is cached next to the source.
+        Patch legacy ONNX crop subgraphs that mix int64 Shape outputs with
+        float arithmetic. The patched file is cached next to the source.
         """
         model_path = str(model_path)
         if model_path.endswith(".ortfixed.onnx"):
@@ -618,7 +617,7 @@ class PRIZMInference:
 
     def _infer_onnx_input_scale(self, model_path: str) -> float:
         """
-        Heuristic: MATLAB ONNX exports often include an input mean subtraction node.
+        Some legacy ONNX exports include an input mean-subtraction node.
         If the stored mean is > 1, the graph expects 0..255-scale intensities.
         """
         try:
@@ -636,8 +635,9 @@ class PRIZMInference:
 
     def _infer_onnx_label_remap(self, model_path: str, num_classes: int):
         """
-        MATLAB PRIZM ONNX exports use class order [ventricle, atrium, background].
-        Python downstream expects [background, ventricle, atrium].
+        Legacy PRIZM ONNX exports use class order
+        [ventricle, atrium, background]. The current analysis pipeline expects
+        [background, ventricle, atrium].
         """
         try:
             model = onnx.load(model_path)
@@ -705,8 +705,6 @@ class PRIZMInference:
             torch.Tensor: Preprocessed image tensor.
         """
         
-        # import pdb; pdb.set_trace()
-
         seg_ch = int(seg_ch)
 
         if isinstance(image, da.Array):
@@ -726,8 +724,8 @@ class PRIZMInference:
                     if c == 1:
                         image = np.repeat(image, self.input_channels, axis=-1)
                     else:
-                        # MATLAB-parity path: use selected segmentation channel
-                        # and replicate to the model input channel count.
+                        # Use the selected segmentation channel and replicate it
+                        # to the model input channel count.
                         ch_idx = max(0, min(seg_ch, c - 1))
                         image = image[:, :, :, ch_idx:ch_idx+1]
                         image = np.repeat(image, self.input_channels, axis=-1)
@@ -752,8 +750,8 @@ class PRIZMInference:
                     if c == 1:
                         image = np.repeat(image, self.input_channels, axis=-1)
                     else:
-                        # MATLAB-parity path: use selected segmentation channel
-                        # and replicate to the model input channel count.
+                        # Use the selected segmentation channel and replicate it
+                        # to the model input channel count.
                         ch_idx = max(0, min(seg_ch, c - 1))
                         image = image[:, :, ch_idx:ch_idx+1]
                         image = np.repeat(image, self.input_channels, axis=-1)
@@ -778,16 +776,12 @@ class PRIZMInference:
                 image = np.transpose(image, (0, 3, 1, 2))
                 
         # image shape = (T, 1, H, W)
-        # import pdb; pdb.set_trace()
-        
         _, _, h_original, w_original = image.shape
 
         image_load = []
         for i in range(image.shape[0]):
             # Keep preprocess on CPU; transfer to device in larger inference batches.
             image_torch = torch.from_numpy(image[i].astype(np.float32)).unsqueeze(0)
-            
-            # import pdb; pdb.set_trace()
             
             # assume image_torch is [C, H, W]
             _, _, h, w = image_torch.shape
@@ -812,8 +806,6 @@ class PRIZMInference:
                     # Pad order: (left, right, top, bottom)
                     image_torch = F.pad(image_torch, (0, pad_w, 0, pad_h), mode="replicate")
 
-            # import pdb; pdb.set_trace()
-
             J = stretchlim(image_torch[0, 0])
             J_modified = J.clone()
             J_modified[0] = J[0] * 1.0
@@ -828,11 +820,7 @@ class PRIZMInference:
                 image_torch = imadjust(image_torch, in_range=J_modified)
             image_load.append(image_torch)
             
-            # import pdb; pdb.set_trace()
-
         image_load = torch.cat(image_load, dim=0)
-        
-        # import pdb; pdb.set_trace()
 
         return image_load, h_original, w_original
 
@@ -863,7 +851,7 @@ class PRIZMInference:
         if input_scale > 1.0:
             image_np = image_np / input_scale
         
-        # Parameters matching MATLAB code
+        # Established PRIZM postprocessing parameters.
         min_area = 300
         dark_th = 0.15
         p_th = 0.70
@@ -872,7 +860,7 @@ class PRIZMInference:
         ventricular_mask = (seg_mask == 1).astype(bool)
         atrium_mask = (seg_mask == 2).astype(bool)
         
-        # Remove small objects (equivalent to bwareaopen)
+        # Remove small connected components.
         if np.any(ventricular_mask):
             ventricular_mask = remove_small_objects(ventricular_mask, min_size=min_area, connectivity=2)
         if np.any(atrium_mask):
@@ -966,8 +954,6 @@ class PRIZMInference:
         masks = []
         atrium_probabilities = []
         
-        # import pdb; pdb.set_trace()
-
         n_frames = int(image_tensor.shape[0])
         start = 0
         current_batch_size = max(1, int(self.infer_batch_size))

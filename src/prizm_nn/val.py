@@ -1,4 +1,3 @@
-import argparse
 import os
 import torch
 import torch.nn.functional as F
@@ -12,7 +11,7 @@ import segmentation_models_pytorch as smp
 
 from prizm_nn.dataset import PRIZM_Dataset
 from model.model import DeepLabV3, DeepLabV3Plus
-from prizm_nn.utils import *
+from prizm_nn.utils import parse_args
 import numpy as np
 from torchvision.utils import save_image
 
@@ -111,20 +110,11 @@ if __name__ == "__main__":
         for i, (image, mask, image_path) in enumerate(tqdm(test_loader, desc="Validation", dynamic_ncols=True)):
             image, mask= image.to(device), mask.to(device)
             outputs = model(image)
-            print(image_path)
-            # print(f"Preds shape: {outputs.shape} | Mask shape: {mask.shape}")
-            # print(f"Preds range: {outputs.min()} - {outputs.max()} | Mask range: {mask.min()} - {mask.max()}")
 
             preds = torch.argmax(outputs, dim=1)
-            # target = torch.argmax(mask, dim=1)
 
             # Convert to one-hot encoding
             preds = F.one_hot(preds, num_classes=args.num_classes).permute(0, 3, 1, 2)
-            # target_one_hot = F.one_hot(target, num_classes=args.num_classes).permute(0, 3, 1, 2)
-
-            # print(f"Preds shape: {preds.shape} | Mask shape: {mask.shape}")
-            # print(f"Preds range: {preds.min()} - {preds.max()} | Mask range: {mask.min()} - {mask.max()}")
-            # exit()
             # Compute stats for metrics
             
             tp, fp, fn, tn = smp.metrics.get_stats(

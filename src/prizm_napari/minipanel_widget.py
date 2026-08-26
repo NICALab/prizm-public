@@ -5,7 +5,6 @@ Napari widget for PRIZM mini-panel + heatmap + LDA/PCA/t-SNE analysis.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pandas as pd
 from napari.qt.threading import thread_worker
@@ -33,10 +32,6 @@ from prizm_napari.input_discovery import (
 )
 from prizm_napari.minipanel_analysis import run_minipanel_analysis
 from prizm_napari.workbook_selection_dialogs import MiniPanelReferenceDialog, OrderedWorkbookSelectionDialog
-
-if TYPE_CHECKING:
-    import napari
-
 
 class PRIZMMiniPanelQWidget(QWidget):
     """
@@ -103,6 +98,15 @@ class PRIZMMiniPanelQWidget(QWidget):
         self.lbl_reference_summary = QLabel("No control/reference choices configured yet.", self)
         self.lbl_reference_summary.setWordWrap(True)
         layout.addWidget(self.lbl_reference_summary, row, 0, 1, 3)
+        row += 1
+
+        self.lbl_metric_contract = QLabel(
+            "Metrics: automatic PRIZM mapping (22 major + 23 minor). "
+            "Entropy and count fields are excluded from functional figures.",
+            self,
+        )
+        self.lbl_metric_contract.setWordWrap(True)
+        layout.addWidget(self.lbl_metric_contract, row, 0, 1, 3)
         row += 1
 
         self.cb_make_heatmap = QCheckBox("Generate heatmap", self)
@@ -377,6 +381,9 @@ class PRIZMMiniPanelQWidget(QWidget):
                     "Output Directory": result.get("output_dir"),
                     "Panel Directory": result.get("panel_dir"),
                     "Stats XLSX": result.get("stats_xlsx"),
+                    "Metric Selection": result.get("metric_selection_xlsx"),
+                    "Major Parameters": result.get("partition_results", {}).get("major", {}).get("n_params"),
+                    "Minor Parameters": result.get("partition_results", {}).get("minor", {}).get("n_params"),
                     "Groups": result.get("n_groups"),
                     "Parameters": result.get("n_params"),
                     "CTRL Index (1-based)": result.get("ctrl_index_1based"),

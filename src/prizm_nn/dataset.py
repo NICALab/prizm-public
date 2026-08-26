@@ -1,6 +1,5 @@
 import glob
 import os
-import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -15,7 +14,7 @@ from torchvision.transforms import v2 as transforms
 from tqdm import tqdm
 
 VALID_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
-MATLAB_TARGET_SIZE = (300, 300)
+PRIZM_TARGET_SIZE = (300, 300)
 DEEPLAB_COMPAT_SIZE = (304, 304)
 
 try:
@@ -37,15 +36,6 @@ def _strip_simple_segmentation_token(stem: str) -> str:
     return stem
 
 
-def _normalize_token(text: str) -> str:
-    return "".join(ch.lower() for ch in str(text) if ch.isalnum())
-
-
-def _extract_t_index_token(name: str) -> int:
-    match = re.search(r"_t(\d+)", str(name))
-    return int(match.group(1)) if match else -1
-
-
 def _image_to_rgb_uint8(image: Image.Image) -> np.ndarray:
     return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
@@ -60,14 +50,14 @@ def _load_mask_u8_from_path(mask_path: str) -> np.ndarray:
         return np.asarray(mask_img, dtype=np.uint8)
 
 
-def _matlab_jitter_color_hsv(
+def _jitter_color_hsv(
     rgb_u8: np.ndarray,
     contrast: float = 0.5,
     saturation: float = 0.5,
     brightness: float = 0.5,
 ) -> np.ndarray:
     """
-    Reproduce the documented jitterColorHSV branch used by the MATLAB transform:
+    Apply the PRIZM HSV augmentation:
     - random saturation offset in [-saturation, saturation]
     - random brightness offset in [-brightness, brightness]
     - random contrast scale in [1-contrast, 1+contrast]
@@ -87,13 +77,13 @@ def _matlab_jitter_color_hsv(
     return np.clip(np.round(rgb_jittered * 255.0), 0.0, 255.0).astype(np.uint8)
 
 
-def _matlab_rgb2gray_uint8(rgb_u8: np.ndarray) -> np.ndarray:
+def _rgb_to_gray_uint8(rgb_u8: np.ndarray) -> np.ndarray:
     rgb = np.asarray(rgb_u8, dtype=np.float32)
     gray = (0.2989 * rgb[..., 0]) + (0.5870 * rgb[..., 1]) + (0.1140 * rgb[..., 2])
     return np.clip(np.round(gray), 0.0, 255.0).astype(np.uint8)
 
 
-def _matlab_stretchlim_uint8(gray_u8: np.ndarray, tol=(0.01, 0.99)) -> Tuple[float, float]:
+def _contrast_limits_uint8(gray_u8: np.ndarray, tol=(0.01, 0.99)) -> Tuple[float, float]:
     gray = np.asarray(gray_u8, dtype=np.uint8)
     hist = np.bincount(gray.reshape(-1), minlength=256).astype(np.int64)
     cdf = np.cumsum(hist)
@@ -112,7 +102,7 @@ def _matlab_stretchlim_uint8(gray_u8: np.ndarray, tol=(0.01, 0.99)) -> Tuple[flo
     return low_idx / 255.0, high_idx / 255.0
 
 
-def _matlab_imadjust_uint8(gray_u8: np.ndarray, in_range: Tuple[float, float]) -> np.ndarray:
+def _rescale_intensity_uint8(gray_u8: np.ndarray, in_range: Tuple[float, float]) -> np.ndarray:
     low, high = float(in_range[0]), float(in_range[1])
     if not np.isfinite(low):
         low = 0.0
@@ -169,43 +159,42 @@ def _pad_one_hot_mask_to_deeplab_compat(mask_chw: torch.Tensor) -> torch.Tensor:
     return padded
 
 
-def _matlab_style_preprocess_gray_u8_from_rgb(
+def _preprocess_gray_uint8_from_rgb(
     rgb_u8: np.ndarray,
     apply_random_transform: bool = True,
 ) -> np.ndarray:
     """
-    Match transformVentricleImageAndLabels.m:
-    RGB conversion -> jitterColorHSV -> rgb2gray -> stretchlim/imadjust -> imresize(300)
-    -> replicate grayscale to 3 channels.
+    Convert RGB to grayscale, apply percentile-based contrast adjustment,
+    resize to 300x300, and replicate grayscale to three channels.
 
-    DeepLab compatibility padding to 304x304 happens after the MATLAB-equivalent
-    preprocessing so the augmentation semantics remain 300x300.
+    DeepLab compatibility padding to 304x304 happens afterward so the
+    augmentation semantics remain 300x300.
     """
     if apply_random_transform:
-        rgb_u8 = _matlab_jitter_color_hsv(
+        rgb_u8 = _jitter_color_hsv(
             rgb_u8,
             contrast=0.5,
             saturation=0.5,
             brightness=0.5,
         )
 
-    gray_u8 = _matlab_rgb2gray_uint8(rgb_u8)
-    low, high = _matlab_stretchlim_uint8(gray_u8)
+    gray_u8 = _rgb_to_gray_uint8(rgb_u8)
+    low, high = _contrast_limits_uint8(gray_u8)
     if apply_random_transform:
         low *= 0.5 + 0.5 * float(np.random.rand())
         high *= 0.7 + 0.3 * float(np.random.rand())
-    gray_u8 = _matlab_imadjust_uint8(gray_u8, (low, high))
-    gray_u8 = _resize_gray_uint8(gray_u8, MATLAB_TARGET_SIZE)
+    gray_u8 = _rescale_intensity_uint8(gray_u8, (low, high))
+    gray_u8 = _resize_gray_uint8(gray_u8, PRIZM_TARGET_SIZE)
 
     return gray_u8
 
 
-def _matlab_style_preprocess_gray_u8(
+def _preprocess_gray_uint8(
     image: Image.Image,
     apply_random_transform: bool = True,
 ) -> np.ndarray:
     rgb_u8 = _image_to_rgb_uint8(image)
-    return _matlab_style_preprocess_gray_u8_from_rgb(
+    return _preprocess_gray_uint8_from_rgb(
         rgb_u8,
         apply_random_transform=apply_random_transform,
     )
@@ -217,11 +206,11 @@ def _gray_u8_to_padded_image_tensor(gray_u8: np.ndarray) -> torch.Tensor:
     return _pad_image_to_deeplab_compat(image_chw)
 
 
-def _matlab_style_preprocess_image(
+def _preprocess_training_image(
     image: Image.Image,
     apply_random_transform: bool = True,
 ) -> torch.Tensor:
-    gray_u8 = _matlab_style_preprocess_gray_u8(
+    gray_u8 = _preprocess_gray_uint8(
         image,
         apply_random_transform=apply_random_transform,
     )
@@ -241,7 +230,7 @@ def _mask_to_one_hot(mask_u8: np.ndarray) -> torch.Tensor:
 def _resize_mask_u8(mask_u8: np.ndarray) -> np.ndarray:
     return np.asarray(
         Image.fromarray(np.asarray(mask_u8, dtype=np.uint8)).resize(
-            MATLAB_TARGET_SIZE, resample=PIL_NEAREST
+            PRIZM_TARGET_SIZE, resample=PIL_NEAREST
         ),
         dtype=np.uint8,
     )
@@ -255,9 +244,9 @@ def _safe_train_test_split(indices: np.ndarray, labels: Sequence[str], test_size
     return train_test_split(indices, test_size=test_size, random_state=seed, stratify=stratify)
 
 
-def discover_matlab_style_pairs(dataset_dir: str) -> List[Tuple[str, str, str]]:
+def discover_segmentation_pairs(dataset_dir: str) -> List[Tuple[str, str, str]]:
     """
-    Discover image/mask pairs for MATLAB-style training.
+    Discover paired images and segmentation masks for PRIZM training.
 
     Returns list of (image_path, mask_path, folder_label).
     """
@@ -284,90 +273,7 @@ def discover_matlab_style_pairs(dataset_dir: str) -> List[Tuple[str, str, str]]:
     return pairs
 
 
-def discover_matlab_monitor_pairs(
-    matlab_results_root: str,
-    session_specs: Sequence[str],
-) -> Dict[str, List[Tuple[str, str, str]]]:
-    """
-    Discover deterministic MATLAB-preprocessed image / MATLAB-mask pairs for
-    session-specific monitoring during training.
-    """
-    root = Path(matlab_results_root)
-    if not root.is_dir():
-        raise FileNotFoundError(f"MATLAB results root not found: {matlab_results_root}")
-
-    if not session_specs:
-        return {}
-
-    condition_dirs = { _normalize_token(p.name): p for p in root.iterdir() if p.is_dir() }
-    monitor_sets: Dict[str, List[Tuple[str, str, str]]] = {}
-
-    for session_spec in session_specs:
-        if "|" not in session_spec:
-            raise ValueError(
-                f"Invalid monitor session spec '{session_spec}'. Expected format CONDITION|SeriesNNN."
-            )
-        cond_raw, series_raw = [part.strip() for part in session_spec.split("|", 1)]
-        cond_key = _normalize_token(cond_raw)
-        series_key = _normalize_token(series_raw)
-
-        if cond_key not in condition_dirs:
-            raise FileNotFoundError(
-                f"Condition '{cond_raw}' not found under MATLAB results root: {matlab_results_root}"
-            )
-
-        condition_dir = condition_dirs[cond_key]
-        preprocessing_root = condition_dir / "preprocessing"
-        segmentation_root = condition_dir / "segmentation_masks"
-        if not preprocessing_root.is_dir():
-            raise FileNotFoundError(f"Missing preprocessing directory: {preprocessing_root}")
-        if not segmentation_root.is_dir():
-            raise FileNotFoundError(f"Missing segmentation mask directory: {segmentation_root}")
-
-        preprocessing_dir = next(
-            (p for p in preprocessing_root.iterdir() if p.is_dir() and series_key in _normalize_token(p.name)),
-            None,
-        )
-        mask_dir = next(
-            (p for p in segmentation_root.iterdir() if p.is_dir() and _normalize_token(p.name) == series_key),
-            None,
-        )
-        if preprocessing_dir is None:
-            raise FileNotFoundError(
-                f"Could not find preprocessing directory for session '{session_spec}' under {preprocessing_root}"
-            )
-        if mask_dir is None:
-            raise FileNotFoundError(
-                f"Could not find segmentation mask directory for session '{session_spec}' under {segmentation_root}"
-            )
-
-        mask_map: Dict[str, Path] = {}
-        for mask_path in mask_dir.iterdir():
-            if not mask_path.is_file():
-                continue
-            if "_Simple Segmentation" not in mask_path.stem:
-                continue
-            mask_map[_strip_simple_segmentation_token(mask_path.stem)] = mask_path
-
-        pairs: List[Tuple[str, str, str]] = []
-        for image_path in preprocessing_dir.iterdir():
-            if not image_path.is_file() or not _is_image_file(str(image_path)):
-                continue
-            stem = image_path.stem
-            if stem.startswith("preprocessing_"):
-                stem = stem[len("preprocessing_") :]
-            if stem in mask_map:
-                pairs.append((str(image_path), str(mask_map[stem]), f"{condition_dir.name}|{mask_dir.name}"))
-
-        pairs.sort(key=lambda item: _extract_t_index_token(Path(item[0]).stem))
-        if not pairs:
-            raise ValueError(f"No paired preprocessing/mask files found for '{session_spec}'.")
-        monitor_sets[f"{condition_dir.name}|{mask_dir.name}"] = pairs
-
-    return monitor_sets
-
-
-def split_matlab_style_pairs(
+def split_segmentation_pairs(
     pairs: Sequence[Tuple[str, str, str]],
     train_ratio: float,
     val_ratio: float,
@@ -409,8 +315,8 @@ def split_matlab_style_pairs(
     }
 
 
-class MatlabParitySegDataset(Dataset):
-    """Dataset that mimics MATLAB transformVentricleImageAndLabels behavior."""
+class PRIZMSegmentationDataset(Dataset):
+    """PRIZM training dataset with joint image and mask preprocessing."""
 
     def __init__(
         self,
@@ -459,7 +365,7 @@ class MatlabParitySegDataset(Dataset):
             ):
                 rgb_u8 = _load_rgb_u8_from_path(image_path)
                 mask_u8 = _load_mask_u8_from_path(mask_path)
-                gray_u8 = _matlab_style_preprocess_gray_u8_from_rgb(
+                gray_u8 = _preprocess_gray_uint8_from_rgb(
                     rgb_u8,
                     apply_random_transform=False,
                 )
@@ -480,7 +386,7 @@ class MatlabParitySegDataset(Dataset):
             rgb_u8 = _load_rgb_u8_from_path(image_path)
             mask_u8 = _load_mask_u8_from_path(mask_path)
 
-        gray_u8 = _matlab_style_preprocess_gray_u8_from_rgb(
+        gray_u8 = _preprocess_gray_uint8_from_rgb(
             rgb_u8,
             apply_random_transform=self.apply_random_transform,
         )
@@ -495,70 +401,6 @@ class MatlabParitySegDataset(Dataset):
         image = _gray_u8_to_padded_image_tensor(gray_u8)
         mask = _pad_one_hot_mask_to_deeplab_compat(_mask_to_one_hot(mask_np))
 
-        return image.float(), mask.float()
-
-
-class MatlabMonitorSegDataset(Dataset):
-    """Deterministic dataset backed by MATLAB preprocessing images and simple masks."""
-
-    def __init__(
-        self,
-        pairs: Sequence[Tuple[str, str, str]],
-        preload_to_memory: bool = True,
-    ):
-        self.pairs = list(pairs)
-        self.preload_to_memory = bool(preload_to_memory)
-        self.cached_tensors: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None
-        if self.preload_to_memory:
-            self._preload()
-
-    def __len__(self) -> int:
-        return len(self.pairs)
-
-    def _preload(self) -> None:
-        cached_tensors: List[Tuple[torch.Tensor, torch.Tensor]] = []
-        for image_path, mask_path, _ in tqdm(
-            self.pairs,
-            desc="Preloading monitor pairs",
-            dynamic_ncols=True,
-            leave=False,
-        ):
-            with Image.open(image_path) as img:
-                image_np = np.asarray(img)
-            if image_np.ndim == 2:
-                gray_u8 = image_np.astype(np.uint8)
-            else:
-                gray_u8 = np.asarray(image_np[..., 0], dtype=np.uint8)
-            if tuple(gray_u8.shape[:2]) != MATLAB_TARGET_SIZE:
-                gray_u8 = _resize_gray_uint8(gray_u8, MATLAB_TARGET_SIZE)
-
-            mask_u8 = _load_mask_u8_from_path(mask_path)
-            mask_np = _resize_mask_u8(mask_u8)
-            image = _gray_u8_to_padded_image_tensor(gray_u8)
-            mask = _pad_one_hot_mask_to_deeplab_compat(_mask_to_one_hot(mask_np))
-            cached_tensors.append((image.float(), mask.float()))
-        self.cached_tensors = cached_tensors
-
-    def __getitem__(self, idx: int):
-        if self.cached_tensors is not None:
-            return self.cached_tensors[idx]
-
-        image_path, mask_path, _ = self.pairs[idx]
-
-        with Image.open(image_path) as img:
-            image_np = np.asarray(img)
-            if image_np.ndim == 2:
-                gray_u8 = image_np.astype(np.uint8)
-            else:
-                gray_u8 = np.asarray(image_np[..., 0], dtype=np.uint8)
-            if tuple(gray_u8.shape[:2]) != MATLAB_TARGET_SIZE:
-                gray_u8 = _resize_gray_uint8(gray_u8, MATLAB_TARGET_SIZE)
-
-        mask_u8 = _load_mask_u8_from_path(mask_path)
-        mask_np = _resize_mask_u8(mask_u8)
-
-        image = _gray_u8_to_padded_image_tensor(gray_u8)
-        mask = _pad_one_hot_mask_to_deeplab_compat(_mask_to_one_hot(mask_np))
         return image.float(), mask.float()
 
 
@@ -603,22 +445,6 @@ class PRIZM_Dataset(Dataset):
         else:
             transform = transforms.Compose([
                 transforms.Resize((304, 304)),  # Resize image to 300x300
-                
-                # # 1) random resize & crop (random scale & aspect)
-                # transforms.RandomResizedCrop(
-                #     size=(304, 304),
-                #     scale=(0.8, 1.0),            # scale image down to between 80%–100% of original area
-                #     ratio=(3/4, 4/3)             # allow some aspect‐ratio change
-                # ),
-                # transforms.RandomAffine(degrees=0, scale=(0.8, 1.2), fill=0),
-                # # 2) random rotation up to ±45°
-                # transforms.RandomRotation(degrees=45),
-                # transforms.RandomHorizontalFlip(p=0.5),
-                # # 4) slight perspective warp
-                # transforms.RandomPerspective(
-                #     distortion_scale=0.5,       # how strong the warp is
-                #     p=0.5                       # apply half the time
-                # ),
                 
                 transforms.Grayscale(num_output_channels=1),
                 transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),  # Apply color jitter
@@ -676,31 +502,3 @@ class PRIZM_Dataset(Dataset):
         else:
             image, mask, image_path = self.data[idx]
             return image, mask, image_path
-
-# Define the dataset class for image and mask pairing
-class PRIZM_Dataset_val(Dataset):
-    def __init__(self, dataset_dir):
-        self.base_dir = dataset_dir
-        # Get all files in the directory
-        images = glob.glob(os.path.join(self.base_dir, "*.png"))
-        print(f"Found {len(images)} images")
-        images.sort()
-    
-        transform = transforms.Compose([
-            transforms.Resize((304, 304)),  # Resize image to 300x300
-            transforms.Grayscale(num_output_channels=1),
-            transforms.ToTensor()  # Convert image to a tensor
-        ])
-
-        # Load the images and masks
-        self.data = []
-        for i in tqdm(range(len(images)), desc=f"Loading data"):
-            image = Image.open(images[i])
-            image = transform(image)
-            self.data.append(image)
-    
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]

@@ -457,10 +457,10 @@ prizm-minipanel-analysis \
   --output-dir /path/to/prizm_minipanel_output
 ```
 
-Expected MiniPanel output includes `panel_heatmap/mini_bar_panel.*`,
-`panel_heatmap/heatmap.*`, `panel_heatmap/stats_significance.xlsx`,
-`LDA_REPORT/`, and `FIGURES_300dpi/` outputs. On the same validation
-computer, this MiniPanel demo completed in around 20 seconds.
+Expected MiniPanel output includes separate `mini_bar_panel_major.*` and
+`mini_bar_panel_minor.*` figures, separate `heatmap_major.*` and
+`heatmap_minor.*` figures, corresponding `stats_significance_*.xlsx` files,
+`LDA_REPORT/`, and `FIGURES_300dpi/` outputs.
 
 ## GUI Usage
 
@@ -579,6 +579,8 @@ Basic workflow:
    The current core defaults include target FPR `0.05`, minimum feature match
    `0.90`, five CV folds, robust median/MAD control statistics, Euclidean
    similarity with top `3`, `200` bagged trees, and random seed `0`.
+   Self similarity and TOST equivalence tables are enabled by default. The
+   additional dominance analyses are optional and disabled by default.
 8. Click `Run 2-Stage MoA`. When it finishes, napari displays a summary with
    the output paths.
 
@@ -611,6 +613,9 @@ Basic workflow:
    - enable `Save all pairwise Welch t-tests` only if the extra all-pairs
      tables are needed. It is off by default.
 5. Review the selected-workbook order and the control/reference summary.
+   MiniPanel automatically uses the PRIZM 22-major/23-minor functional
+   metric mapping; segmentation-entropy and count fields are not included in
+   these functional figures.
 6. Set `Output Directory`. If left blank, PRIZM creates a timestamped
    `output_*` folder under the selected Excel root.
 7. `Generate heatmap`, `Run Fisher LDA`, `Run PCA`, and `Run t-SNE` are all
@@ -619,8 +624,8 @@ Basic workflow:
 8. Click `Run MiniPanel Analysis`. When it finishes, napari displays a
    summary with the output paths.
 
-The output directory contains `panel_heatmap/mini_bar_panel.*`,
-`panel_heatmap/heatmap.*`, `panel_heatmap/stats_significance.xlsx`,
+The output directory contains separate major/minor MiniPanels, heatmaps, and
+statistics workbooks under `panel_heatmap/`, plus `metric_selection.xlsx`,
 `LDA_REPORT/`, and `FIGURES_300dpi/` for the enabled analyses.
 
 ## Command-Line Usage
@@ -687,6 +692,10 @@ Common options:
 - `--sim-metric {euclid,cosine}`
 - `--sim-top-k <int>`
 - `--self-label <name>`
+- `--tost-alpha <float>`
+- `--tost-delta-softmax <float>`
+- `--tost-delta-distance <float>`
+- `--sim-multiplier <float>`
 - `--dominance-alpha <float>`
 - `--dominance-competitor-mode {mean,top2mean,best}`
 - `--perm-n <int>`
@@ -694,9 +703,10 @@ Common options:
 - `--no-figures`
 - `--no-robust-control-stats`
 - `--no-self-similarity`
-- `--no-dominance-stats`
-- `--no-ml-dominance-stats`
+- `--dominance-stats`: add the Python dominance tables
+- `--ml-dominance-stats`: add the Python ML-dominance tables
 - `--include-self-in-dominance`
+- `--no-tost-vs-self`
 - `--no-train-in-analysis`
 
 Use `prizm-moa-2stage --help` for the full option list.

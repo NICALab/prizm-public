@@ -104,21 +104,19 @@ def parse_args():
     parser.add_argument('--lr_drop_factor', type=float, default=0.3, help='Factor to reduce learning rate by.')
     parser.add_argument('--lr_drop_period', type=int, default=5, help='Period in epochs to reduce learning rate.')
     parser.add_argument('--momentum', type=float, default=0.9, help='Momentum for the SGD optimizer.')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizer (MATLAB SGDM default L2 regularization is 1e-4).')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='L2 weight decay for the optimizer.')
     parser.add_argument('--tversky_alpha', type=float, default=0.01, help='Alpha parameter for Tversky loss.')
     parser.add_argument('--tversky_beta', type=float, default=0.99, help='Beta parameter for Tversky loss.')
     parser.add_argument('--train_split', type=float, default=0.90, help='Proportion of paired data used for training.')
     parser.add_argument('--val_split', type=float, default=0.05, help='Proportion of paired data used for validation.')
     parser.add_argument('--test_split', type=float, default=0.05, help='Proportion of paired data used for held-out testing.')
-    parser.add_argument('--dataset_dir', type=str, default="/media/HDD1/josh/prizm/data", help='Path to the dataset directory.')
-    parser.add_argument('--test_dataset_dir', type=str, default="/media/HDD1/josh/prizm/data/20240827/preprocessing", help='Path to the test dataset directory.')
+    parser.add_argument('--dataset_dir', type=str, required=True, help='Path to the dataset directory.')
     parser.add_argument('--augmentation', type=int, default=0, help='Whether to apply data augmentation during training.')
     parser.add_argument('--random_rot90', type=int, default=0, help='Apply random 0/90/180/270 degree joint rotation to training image/mask pairs.')
-    parser.add_argument('--exp_name', type=str, default="11242024_init", help='Experiment name for logging and results.')
-    parser.add_argument('--results_dir', type=str, default="/media/HDD1/josh/prizm/results/11242024", help='Base directory for results.')
+    parser.add_argument('--exp_name', type=str, default="prizm_experiment", help='Experiment name for logging and results.')
+    parser.add_argument('--results_dir', type=str, default="results", help='Base directory for results.')
     
-    parser.add_argument('--log_interval', type=int, default=50, help='Iteration interval for training logs (MATLAB VerboseFrequency default used in the live script is 50).')
-    parser.add_argument('--val_interval', type=int, default=1, help='[Deprecated] Unused legacy arg.')
+    parser.add_argument('--log_interval', type=int, default=50, help='Iteration interval for training logs.')
     parser.add_argument('--save_model_interval', type=int, default=1, help='Interval (in epochs) to save the model.')
     parser.add_argument(
         '--validation_interval',
@@ -126,7 +124,7 @@ def parse_args():
         dest='validation_interval',
         type=int,
         default=50,
-        help='Iteration interval for validation checks (MATLAB ValidationFrequency default is 50 when unspecified).',
+        help='Iteration interval for validation checks.',
     )
     parser.add_argument('--validation_patience', type=int, default=30, help='Early-stop patience in validation checks.')
     parser.add_argument('--early_stopping_min_delta', type=float, default=0.0, help='Minimum improvement in the chosen early-stop metric to reset patience.')
@@ -152,33 +150,12 @@ def parse_args():
     parser.add_argument('--decoder_channels', type=int, default=256, help='Number of channels in the decoder.')
     parser.add_argument('--encoder_output_stride', type=int, default=16, help='Output stride of the encoder.')
     parser.add_argument('--decoder_atrous_rates', type=int, nargs='+', default=[6, 12, 18], help='Atrous rates for the decoder in DeepLabV3+.')
-    parser.add_argument('--input_channels', type=int, default=3, help='Model input channels (MATLAB parity uses 3).')
-    parser.add_argument('--encoder_weights', type=str, default='none', help='Encoder weight initialization. MATLAB deeplabv3plusLayers with resnet50 uses a pretrained backbone.')
+    parser.add_argument('--input_channels', type=int, default=3, help='Number of model input channels.')
+    parser.add_argument('--encoder_weights', type=str, default='none', help='Encoder weight initialization; use "none" for random initialization.')
     
-    parser.add_argument('--include_background', type=int, default=0, help='Include background class in the loss calculation.')
     parser.add_argument('--smooth_loss', type=str, default='tv', choices=['tv', 'sd'], help='Smoothness loss to use.')
     parser.add_argument('--lambda_smooth', type=float, default=0.0, help='Weight for total variation loss.')
-    parser.add_argument('--matlab_parity', type=int, default=1, help='Enable MATLAB-parity data split and preprocessing flow.')
-    parser.add_argument('--apply_random_transform_to_eval', type=int, default=0, help='Apply MATLAB-like random train augmentation on val/test too. Default 0 keeps validation/test deterministic.')
-    parser.add_argument(
-        '--monitor_matlab_results_root',
-        type=str,
-        default='',
-        help='Optional MATLAB result root used for deterministic monitored-session evaluation during training.',
-    )
-    parser.add_argument(
-        '--monitor_sessions',
-        type=str,
-        nargs='*',
-        default=[],
-        help='Session specs like ISO_50|Series048 to monitor against MATLAB masks during training.',
-    )
-    parser.add_argument(
-        '--monitor_batch_size',
-        type=int,
-        default=8,
-        help='Batch size for monitored MATLAB-session evaluation.',
-    )
+    parser.add_argument('--apply_random_transform_to_eval', type=int, default=0, help='Apply random training transforms to validation and test data. Default 0 keeps evaluation deterministic.')
     parser.add_argument('--num_workers', type=int, default=4, help='Dataloader workers.')
     parser.add_argument('--pin_memory', type=int, default=1, help='Dataloader pin_memory.')
     parser.add_argument(

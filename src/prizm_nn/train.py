@@ -1,23 +1,19 @@
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.optim as optim
-from sklearn.model_selection import train_test_split
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from prizm_nn.dataset import (
-    MatlabMonitorSegDataset,
-    MatlabParitySegDataset,
-    discover_matlab_monitor_pairs,
-    PRIZM_Dataset,
-    discover_matlab_style_pairs,
-    split_matlab_style_pairs,
+    PRIZMSegmentationDataset,
+    discover_segmentation_pairs,
+    split_segmentation_pairs,
 )
 from prizm_nn.utils import (
     overlay_segmentation,
@@ -28,11 +24,6 @@ from prizm_nn.utils import (
 from model.model import DeepLabV3, DeepLabV3Plus
 
 try:
-    from scipy.io import savemat
-except Exception:  # pragma: no cover
-    savemat = None
-
-try:
     from torch.utils.tensorboard import SummaryWriter
     _TB_AVAILABLE = True
     _TB_IMPORT_ERROR = None
@@ -41,17 +32,11 @@ except Exception as e:  # pragma: no cover
     _TB_AVAILABLE = False
     _TB_IMPORT_ERROR = e
 
-try:
-    from monai.losses import TverskyLoss as MonaiTverskyLoss
-except Exception:  # pragma: no cover
-    MonaiTverskyLoss = None
-
-
 CLASS_NAMES = ["Background", "Ventricle", "Atrium"]
 
 
-class MatlabTverskyLoss(torch.nn.Module):
-    """Exact reduction semantics for the MATLAB tverskyPixelClassificationLayer."""
+class PRIZMTverskyLoss(torch.nn.Module):
+    """Tversky loss with per-sample, per-class spatial reduction."""
 
     def __init__(self, alpha: float = 0.01, beta: float = 0.99, eps: float = 1e-8):
         super().__init__()
@@ -63,9 +48,8 @@ class MatlabTverskyLoss(torch.nn.Module):
         probs = torch.softmax(logits, dim=1)
         target = target_onehot.float()
 
-        # MATLAB layer computes per-class, per-sample TP/FP/FN by summing over H,W
-        # on arrays shaped [H,W,C,N], then sums over classes and averages over N.
-        # PyTorch tensors here are [N,C,H,W], so sum over spatial dims only.
+        # Compute TP/FP/FN per class and per sample over the spatial dimensions,
+        # then sum over classes and average over the batch.
         dims = (2, 3)
         tp = torch.sum(probs * target, dim=dims)
         fp = torch.sum(probs * (1.0 - target), dim=dims)
@@ -104,58 +88,41 @@ def _build_model(args, device: torch.device):
 
 
 def _build_dataloaders(args):
-    if bool(args.matlab_parity):
-        pairs = discover_matlab_style_pairs(args.dataset_dir)
-        if len(pairs) == 0:
-            raise ValueError(
-                f"No MATLAB-style image/mask pairs found in {args.dataset_dir}. "
-                "Expected paired image + '*_Simple Segmentation*' mask files."
-            )
-
-        split = split_matlab_style_pairs(
-            pairs=pairs,
-            train_ratio=float(args.train_split),
-            val_ratio=float(args.val_split),
-            test_ratio=float(args.test_split),
-            seed=int(args.seed),
+    pairs = discover_segmentation_pairs(args.dataset_dir)
+    if len(pairs) == 0:
+        raise ValueError(
+            f"No paired images and masks found in {args.dataset_dir}. "
+            "Expected each image to have a corresponding "
+            "'*_Simple Segmentation*' mask."
         )
 
-        train_dataset = MatlabParitySegDataset(
-            split["train"],
-            apply_random_transform=True,
-            random_rot90=bool(args.random_rot90),
-            preload_to_memory=bool(args.preload_to_memory),
-        )
-        eval_random = bool(args.apply_random_transform_to_eval)
-        val_dataset = MatlabParitySegDataset(
-            split["val"],
-            apply_random_transform=eval_random,
-            random_rot90=False,
-            preload_to_memory=bool(args.preload_to_memory),
-        )
-        test_dataset = MatlabParitySegDataset(
-            split["test"],
-            apply_random_transform=eval_random,
-            random_rot90=False,
-            preload_to_memory=bool(args.preload_to_memory),
-        )
-    else:
-        # Backward-compatible legacy path.
-        dataset = PRIZM_Dataset(args, mode="train")
-        train_data, holdout = train_test_split(
-            dataset,
-            test_size=(args.val_split + args.test_split),
-            random_state=args.seed,
-        )
-        holdout_rel_test = args.test_split / (args.val_split + args.test_split)
-        val_data, test_data = train_test_split(
-            holdout,
-            test_size=holdout_rel_test,
-            random_state=args.seed,
-        )
-        train_dataset = train_data
-        val_dataset = val_data
-        test_dataset = test_data
+    split = split_segmentation_pairs(
+        pairs=pairs,
+        train_ratio=float(args.train_split),
+        val_ratio=float(args.val_split),
+        test_ratio=float(args.test_split),
+        seed=int(args.seed),
+    )
+
+    train_dataset = PRIZMSegmentationDataset(
+        split["train"],
+        apply_random_transform=True,
+        random_rot90=bool(args.random_rot90),
+        preload_to_memory=bool(args.preload_to_memory),
+    )
+    eval_random = bool(args.apply_random_transform_to_eval)
+    val_dataset = PRIZMSegmentationDataset(
+        split["val"],
+        apply_random_transform=eval_random,
+        random_rot90=False,
+        preload_to_memory=bool(args.preload_to_memory),
+    )
+    test_dataset = PRIZMSegmentationDataset(
+        split["test"],
+        apply_random_transform=eval_random,
+        random_rot90=False,
+        preload_to_memory=bool(args.preload_to_memory),
+    )
 
     pin_memory = bool(args.pin_memory and torch.cuda.is_available())
     train_loader = DataLoader(
@@ -183,32 +150,6 @@ def _build_dataloaders(args):
         pin_memory=pin_memory,
     )
     return train_loader, val_loader, test_loader
-
-
-def _build_monitor_loaders(args):
-    if not args.monitor_matlab_results_root or not args.monitor_sessions:
-        return {}
-
-    monitor_pairs = discover_matlab_monitor_pairs(
-        matlab_results_root=args.monitor_matlab_results_root,
-        session_specs=args.monitor_sessions,
-    )
-    pin_memory = bool(args.pin_memory and torch.cuda.is_available())
-    monitor_loaders = {}
-    for session_name, pairs in monitor_pairs.items():
-        dataset = MatlabMonitorSegDataset(
-            pairs,
-            preload_to_memory=bool(args.preload_to_memory),
-        )
-        monitor_loaders[session_name] = DataLoader(
-            dataset,
-            batch_size=max(int(args.monitor_batch_size), 1),
-            shuffle=False,
-            drop_last=False,
-            num_workers=args.num_workers,
-            pin_memory=pin_memory,
-        )
-    return monitor_loaders
 
 
 def _batch_pixel_accuracy(logits: torch.Tensor, target_onehot: torch.Tensor) -> float:
@@ -342,7 +283,7 @@ def _last_finite(values: np.ndarray, default: float = np.nan) -> float:
     return float(finite[-1])
 
 
-def _log_legacy_metric_scalars(
+def _log_metric_scalars(
     scalar_logger,
     phase: str,
     loss_value: float,
@@ -430,39 +371,7 @@ def _to_three_channel(x: torch.Tensor) -> torch.Tensor:
     return x.repeat(1, 3, 1, 1)[:, :3, :, :]
 
 
-def _mask_onehot_to_color_rgb(mask: torch.Tensor) -> torch.Tensor:
-    idx = torch.argmax(mask, dim=1)
-    rgb = torch.zeros((mask.shape[0], 3, mask.shape[2], mask.shape[3]), dtype=torch.float32)
-    rgb[:, 0][idx == 1] = 1.0
-    rgb[:, 1][idx == 2] = 1.0
-    return rgb
-
-
-def _mask_pair_mismatch_rgb(mask: torch.Tensor, pred_onehot: torch.Tensor) -> torch.Tensor:
-    gt_idx = torch.argmax(mask, dim=1)
-    pred_idx = torch.argmax(pred_onehot, dim=1)
-    mismatch = gt_idx != pred_idx
-    rgb = torch.zeros((mask.shape[0], 3, mask.shape[2], mask.shape[3]), dtype=torch.float32)
-
-    gt_v = (gt_idx == 1) & mismatch
-    gt_a = (gt_idx == 2) & mismatch
-    pred_v = (pred_idx == 1) & mismatch
-    pred_a = (pred_idx == 2) & mismatch
-
-    rgb[:, 0][gt_v] = 1.0
-    rgb[:, 1][gt_a] = 1.0
-    rgb[:, 0][pred_v] = 1.0
-    rgb[:, 2][pred_v] = 1.0
-    rgb[:, 1][pred_a] = 1.0
-    rgb[:, 2][pred_a] = 1.0
-    return rgb
-
-
-def _sanitize_tag_component(name: str) -> str:
-    return "".join(ch if ch.isalnum() else "_" for ch in str(name)).strip("_")
-
-
-def _log_legacy_preview_images(
+def _log_preview_images(
     writer: SummaryWriter,
     phase: str,
     image: torch.Tensor,
@@ -499,85 +408,8 @@ def _log_legacy_preview_images(
     writer.add_images(f"{prefix}/03. {phase_name} Prediction (Argmax)", pred_rgb, step)
 
 
-def _log_monitor_metric_scalars(
-    scalar_logger,
-    tag_prefix: str,
-    loss_value: float,
-    pixel_accuracy: float,
-    overall_df: pd.DataFrame,
-    class_df: pd.DataFrame,
-    step: int,
-) -> None:
-    scalar_logger(f"{tag_prefix}/Loss", float(loss_value), step)
-    scalar_logger(f"{tag_prefix}/PixelAccuracy", float(pixel_accuracy), step)
-    if not overall_df.empty:
-        row = overall_df.iloc[0]
-        scalar_logger(f"{tag_prefix}/Overall/Accuracy", float(row["Accuracy (Overall)"]), step)
-        scalar_logger(f"{tag_prefix}/Overall/IoU", float(row["IoU (Overall)"]), step)
-        scalar_logger(f"{tag_prefix}/Overall/Precision", float(row["Precision (Overall)"]), step)
-        scalar_logger(f"{tag_prefix}/Overall/Dice", float(row["Dice (Overall)"]), step)
-    for _, row in class_df.iterrows():
-        class_tag = _sanitize_tag_component(str(row["ClassName"]))
-        scalar_logger(f"{tag_prefix}/{class_tag}/Accuracy", float(row["Accuracy"]), step)
-        scalar_logger(f"{tag_prefix}/{class_tag}/IoU", float(row["IoU"]), step)
-        scalar_logger(f"{tag_prefix}/{class_tag}/Precision", float(row["Precision"]), step)
-        scalar_logger(f"{tag_prefix}/{class_tag}/Dice", float(row["Dice"]), step)
-
-
-def _log_monitor_preview_images(
-    writer: SummaryWriter,
-    phase_prefix: str,
-    session_name: str,
-    image: torch.Tensor,
-    mask: torch.Tensor,
-    pred_onehot: torch.Tensor,
-    step: int,
-) -> None:
-    max_n = min(4, image.shape[0])
-    image = image[:max_n].float()
-    mask = mask[:max_n].float()
-    pred_onehot = pred_onehot[:max_n].float()
-
-    session_tag = _sanitize_tag_component(session_name)
-    input_rgb = _to_three_channel(image)
-    gt_rgb = _mask_onehot_to_color_rgb(mask)
-    pred_rgb = _mask_onehot_to_color_rgb(pred_onehot)
-    overlay = overlay_segmentation(image, pred_onehot)
-    mismatch_rgb = _mask_pair_mismatch_rgb(mask, pred_onehot)
-
-    writer.add_images(f"{phase_prefix}/{session_tag}/00. Overlay", overlay, step)
-    writer.add_images(f"{phase_prefix}/{session_tag}/01. Input", input_rgb, step)
-    writer.add_images(f"{phase_prefix}/{session_tag}/02. MATLAB Ground Truth", gt_rgb, step)
-    writer.add_images(f"{phase_prefix}/{session_tag}/03. Prediction", pred_rgb, step)
-    writer.add_images(f"{phase_prefix}/{session_tag}/04. Mismatch", mismatch_rgb, step)
-
-
 def main():
     args = parse_args()
-
-    if bool(args.matlab_parity):
-        matlab_live_script_expectations = {
-            "apply_random_transform_to_eval": 1,
-            "epochs": 100,
-            "validation_patience": 30,
-            "train_batch_size": 8,
-            "validation_interval": 50,
-            "log_interval": 50,
-            "optimizer": "sgd",
-            "lr_scheduler": "step",
-            "lr_drop_factor": 0.3,
-            "lr_drop_period": 5,
-            "encoder_weights": "imagenet",
-        }
-        mismatches = []
-        for key, expected in matlab_live_script_expectations.items():
-            actual = getattr(args, key)
-            if actual != expected:
-                mismatches.append(f"{key}={actual!r} (MATLAB script uses {expected!r})")
-        if mismatches:
-            print("[WARN] matlab_parity=1 but CLI args diverge from the MATLAB training live script:")
-            for item in mismatches:
-                print(f"  - {item}")
 
     if not _TB_AVAILABLE:
         raise RuntimeError(
@@ -596,7 +428,6 @@ def main():
     writer = SummaryWriter(log_dir=str(log_dir))
     writer.add_text("Arguments", str(args))
     scalar_records = []
-    monitor_records: List[Dict[str, float]] = []
 
     def log_scalar(tag: str, value: float, step: int) -> None:
         v = float(value)
@@ -635,38 +466,17 @@ def main():
             optimizer, T_max=max(args.epochs, 1), eta_min=0.0
         )
 
-    if bool(args.matlab_parity):
-        criterion = MatlabTverskyLoss(
-            alpha=args.tversky_alpha,
-            beta=args.tversky_beta,
-        )
-    elif MonaiTverskyLoss is not None:
-        criterion = MonaiTverskyLoss(
-            include_background=bool(args.include_background),
-            to_onehot_y=False,
-            sigmoid=False,
-            softmax=True,
-            smooth_nr=1e-08,
-            smooth_dr=1e-08,
-            alpha=args.tversky_alpha,
-            beta=args.tversky_beta,
-        )
-    else:
-        criterion = MatlabTverskyLoss(
-            alpha=args.tversky_alpha,
-            beta=args.tversky_beta,
-        )
+    criterion = PRIZMTverskyLoss(
+        alpha=args.tversky_alpha,
+        beta=args.tversky_beta,
+    )
 
     train_loader, val_loader, test_loader = _build_dataloaders(args)
-    monitor_loaders = _build_monitor_loaders(args)
     print(
         f"Training samples: {len(train_loader.dataset)} | "
         f"Validation samples: {len(val_loader.dataset)} | "
         f"Test samples: {len(test_loader.dataset)}"
     )
-    if monitor_loaders:
-        for session_name, loader in monitor_loaders.items():
-            print(f"Monitor session: {session_name} | Frames: {len(loader.dataset)}")
 
     train_loss_hist = []
     val_loss_hist = []
@@ -684,62 +494,6 @@ def main():
     train_log_interval = max(int(args.log_interval), 1)
     validation_interval = max(int(args.validation_interval), 1)
     save_model_interval = max(int(args.save_model_interval), 1)
-
-    def run_monitor_evaluations(phase_prefix: str, step: int) -> None:
-        if not monitor_loaders:
-            return
-        for session_name, loader in monitor_loaders.items():
-            m_loss, m_acc, m_overall, m_class, _, m_preview = evaluate_loader(
-                model=model,
-                loader=loader,
-                criterion=criterion,
-                device=device,
-                num_classes=args.num_classes,
-                return_preview=True,
-            )
-            tag_prefix = f"{phase_prefix}/{_sanitize_tag_component(session_name)}"
-            _log_monitor_metric_scalars(
-                scalar_logger=log_scalar,
-                tag_prefix=tag_prefix,
-                loss_value=m_loss,
-                pixel_accuracy=m_acc,
-                overall_df=m_overall,
-                class_df=m_class,
-                step=step,
-            )
-            if m_preview is not None:
-                _log_monitor_preview_images(
-                    writer=writer,
-                    phase_prefix=phase_prefix,
-                    session_name=session_name,
-                    image=m_preview["image"],
-                    mask=m_preview["mask"],
-                    pred_onehot=m_preview["pred_onehot"],
-                    step=step,
-                )
-
-            overall_row = m_overall.iloc[0] if not m_overall.empty else {}
-            class_map = {
-                str(row["ClassName"]): row
-                for _, row in m_class.iterrows()
-            }
-            vent = class_map.get("Ventricle", {})
-            atr = class_map.get("Atrium", {})
-            monitor_records.append(
-                {
-                    "Step": float(step),
-                    "Phase": phase_prefix,
-                    "Session": session_name,
-                    "Loss": float(m_loss),
-                    "PixelAccuracy": float(m_acc),
-                    "OverallDice": float(overall_row.get("Dice (Overall)", np.nan)),
-                    "OverallIoU": float(overall_row.get("IoU (Overall)", np.nan)),
-                    "VentricleDice": float(vent.get("Dice", np.nan)),
-                    "VentricleIoU": float(vent.get("IoU", np.nan)),
-                    "AtriumDice": float(atr.get("Dice", np.nan)),
-                    "AtriumIoU": float(atr.get("IoU", np.nan)),
-                }
-            )
 
     for epoch in tqdm(range(args.epochs), dynamic_ncols=True, desc="Epochs"):
         model.train()
@@ -816,7 +570,7 @@ def main():
                 log_scalar("Train/Loss", log_loss, global_iter)
                 log_scalar("Train/PixelAccuracy", log_acc, global_iter)
                 log_scalar("Train/BaseLearnRate", current_lr, global_iter)
-                _log_legacy_metric_scalars(
+                _log_metric_scalars(
                     scalar_logger=log_scalar,
                     phase="Train",
                     loss_value=log_loss,
@@ -825,7 +579,7 @@ def main():
                     step=global_iter,
                 )
                 if log_last_preview is not None:
-                    _log_legacy_preview_images(
+                    _log_preview_images(
                         writer=writer,
                         phase="Train",
                         image=log_last_preview["image"],
@@ -857,7 +611,7 @@ def main():
 
                 log_scalar("Validation/Loss", float(v_loss), global_iter)
                 log_scalar("Validation/PixelAccuracy", float(v_acc), global_iter)
-                _log_legacy_metric_scalars(
+                _log_metric_scalars(
                     scalar_logger=log_scalar,
                     phase="Validation",
                     loss_value=float(v_loss),
@@ -873,7 +627,7 @@ def main():
                     step=global_iter,
                 )
                 if v_preview is not None:
-                    _log_legacy_preview_images(
+                    _log_preview_images(
                         writer=writer,
                         phase="Validation",
                         image=v_preview["image"],
@@ -881,8 +635,6 @@ def main():
                         pred_onehot=v_preview["pred_onehot"],
                         step=global_iter,
                     )
-                run_monitor_evaluations(phase_prefix="MonitorValidation", step=global_iter)
-
                 current_val_dice = float(
                     v_overall.iloc[0]["Dice (Overall)"] if not v_overall.empty else np.nan
                 )
@@ -950,7 +702,7 @@ def main():
     conf_df.to_csv(analysis_dir / f"ConfusionMatrix-{dt}.txt", sep="\t")
     conf_norm_df.to_csv(analysis_dir / f"NormalizedConfusionMatrix-{dt}.txt", sep="\t")
 
-    # MATLAB-like TrainingInfo struct export.
+    # Consolidated training statistics used by the CSV and Excel reports.
     info = {
         "TrainingLoss": np.asarray(train_loss_hist, dtype=np.float32),
         "ValidationLoss": np.asarray(val_loss_hist, dtype=np.float32),
@@ -969,9 +721,6 @@ def main():
         ),
         "EarlyStoppingMetric": str(args.early_stopping_metric),
     }
-
-    if savemat is not None:
-        savemat(experiment_path / f"TrainingInfo_{dt}.mat", {"info": info})
 
     summary = pd.DataFrame(
         [
@@ -1007,7 +756,7 @@ def main():
 
     log_scalar("Test/Loss", float(test_loss), global_iter)
     log_scalar("Test/PixelAccuracy", float(test_acc), global_iter)
-    _log_legacy_metric_scalars(
+    _log_metric_scalars(
         scalar_logger=log_scalar,
         phase="Test",
         loss_value=float(test_loss),
@@ -1023,7 +772,7 @@ def main():
         step=global_iter,
     )
     if test_preview is not None:
-        _log_legacy_preview_images(
+        _log_preview_images(
             writer=writer,
             phase="Test",
             image=test_preview["image"],
@@ -1031,14 +780,10 @@ def main():
             pred_onehot=test_preview["pred_onehot"],
             step=global_iter,
         )
-    run_monitor_evaluations(phase_prefix="MonitorTest", step=global_iter)
-
     args_df = pd.DataFrame(
         [{"Argument": k, "Value": str(v)} for k, v in sorted(vars(args).items())]
     )
     scalar_df = pd.DataFrame(scalar_records, columns=["Step", "Tag", "Value"])
-    monitor_df = pd.DataFrame(monitor_records)
-
     excel_path = analysis_dir / f"TrainingAllInOne-{dt}.xlsx"
     try:
         with pd.ExcelWriter(excel_path, engine="openpyxl") as writer_xlsx:
@@ -1046,8 +791,6 @@ def main():
             summary.to_excel(writer_xlsx, sheet_name="TrainingSummary", index=False)
             history_df.to_excel(writer_xlsx, sheet_name="TrainingHistory", index=False)
             scalar_df.to_excel(writer_xlsx, sheet_name="ScalarLog", index=False)
-            if not monitor_df.empty:
-                monitor_df.to_excel(writer_xlsx, sheet_name="MonitorSeries", index=False)
             overall_df.to_excel(writer_xlsx, sheet_name="DataSetMetrics", index=False)
             class_df.to_excel(writer_xlsx, sheet_name="ClassMetrics", index=False)
             conf_df.to_excel(writer_xlsx, sheet_name="ConfusionMatrix", index=True)
@@ -1057,9 +800,6 @@ def main():
         print(f"Saved Excel report: {excel_path}")
     except Exception as e:
         print(f"[WARN] Failed to save Excel report: {e}")
-
-    if not monitor_df.empty:
-        monitor_df.to_csv(analysis_dir / f"MonitoredSessionMetrics-{dt}.csv", index=False)
 
     writer.close()
 

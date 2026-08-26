@@ -58,16 +58,3 @@ class DeepLabV3Plus(nn.Module):
     def forward(self, x):
         """Forward pass through the model."""
         return self.model(x)
-
-
-# # Main function
-# if __name__ == "__main__":
-#     # Initialize the model
-#     model = DeepLabV3Plus(num_classes=3)
-
-#     # Load a sample image
-#     image = torch.randn(2, 1, 304, 304)
-
-#     # Perform a forward pass
-#     output = model(image)
-#     print(output.shape)

@@ -2,15 +2,13 @@
 Napari widget for chemical analysis of functional feature vectors.
 """
 
-from typing import TYPE_CHECKING
+import logging
 import os
 from pathlib import Path
 
-import napari
 from napari.qt.threading import thread_worker
 from PyQt5.QtCore import Qt
 from qtpy.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QGridLayout,
     QLabel,
@@ -29,8 +27,7 @@ from matplotlib.figure import Figure
 
 from prizm_napari._widget import PandasModel
 
-if TYPE_CHECKING:
-    import napari
+LOGGER = logging.getLogger(__name__)
 
 
 class PRIZMChemicalAnalysisQWidget(QWidget):
@@ -395,15 +392,9 @@ class PRIZMChemicalAnalysisQWidget(QWidget):
         self.btn_stop.setVisible(False)
         self._current_worker = None
         
-        print(f"DEBUG: Analysis complete. Results keys: {list(results.keys()) if results else 'None'}")
-        print(f"DEBUG: Visualization checkbox checked: {self.cb_visualize.isChecked()}")
-        
         # Display results in napari if enabled
-        if self.cb_visualize.isChecked():
-            print("DEBUG: Calling _display_results...")
+        if results is not None and self.cb_visualize.isChecked():
             self._display_results(results)
-        else:
-            print("DEBUG: Visualization is disabled, skipping display")
     
     def _display_results(self, results):
         """Display analysis results in napari viewer."""
@@ -413,22 +404,17 @@ class PRIZMChemicalAnalysisQWidget(QWidget):
         
         # Load and display figures
         figure_paths = results.get('figure_paths', {})
-        print(f"DEBUG: Found {len(figure_paths)} figure paths in results")
         
         if not figure_paths:
-            print("DEBUG: No figure_paths found in results dictionary")
-            print(f"DEBUG: Results keys: {list(results.keys())}")
             return
         
-        for fig_name, fig_path in figure_paths.items():
-            print(f"DEBUG: Processing figure {fig_name}: {fig_path}")
+        for fig_path in figure_paths.values():
             if not os.path.exists(fig_path):
-                print(f"DEBUG: Figure file does not exist: {fig_path}")
+                LOGGER.warning("Analysis figure does not exist: %s", fig_path)
                 continue
                 
             try:
                 from matplotlib.image import imread
-                import matplotlib.pyplot as plt
                 
                 fig = Figure(figsize=(10, 8))
                 ax = fig.add_subplot(111)
@@ -440,22 +426,15 @@ class PRIZMChemicalAnalysisQWidget(QWidget):
                 canvas = FigureCanvas(fig)
                 tab_name = Path(fig_path).stem.replace('_', ' ').title()
                 tab_plots.addTab(canvas, tab_name)
-                print(f"DEBUG: Added tab '{tab_name}' for figure {fig_name}")
             except Exception as e:
-                import traceback
-                print(f"Error loading figure {fig_path}: {e}")
-                traceback.print_exc()
+                LOGGER.warning("Could not load analysis figure %s: %s", fig_path, e)
         
         if tab_plots.count() > 0:
-            print(f"DEBUG: Adding dock widget with {tab_plots.count()} tabs")
             self.viewer.window.add_dock_widget(
                 tab_plots,
                 name="Analysis Figures",
                 area="bottom"
             )
-            print("DEBUG: Dock widget added successfully")
-        else:
-            print("DEBUG: No tabs to display")
         
         # Create tabbed widget for tables
         tab_tables = QTabWidget()

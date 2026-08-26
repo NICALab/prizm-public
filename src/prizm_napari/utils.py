@@ -110,8 +110,8 @@ def overlay_time_series(image_ts, mask_ts, stats_df, viz_data=None, output_dir=N
     vent_color = (0, 0, 255)           # Blue for ventricle
     atr_color  = (0, 255, 0)           # Green for atrium
     cent_line_color = (0, 0, 0)        # Black for line between centroids
-    vent_major_color = (255, 255, 0)   # Yellow for ventricle major axis (like MATLAB)
-    vent_minor_color = (255, 0, 0)     # Red for ventricle minor axis (like MATLAB)
+    vent_major_color = (255, 255, 0)   # Yellow for ventricle major axis
+    vent_minor_color = (255, 0, 0)     # Red for ventricle minor axis
     va_center_color = (0, 255, 255)    # Cyan for V-A center line
     va_top_color = (0, 255, 255)       # Cyan for V-A top line
     va_bottom_color = (0, 255, 255)    # Cyan for V-A bottom line
@@ -171,7 +171,7 @@ def overlay_time_series(image_ts, mask_ts, stats_df, viz_data=None, output_dir=N
             vent_centroid = row['VentricularCentroid']
             vx = int(vent_centroid[0])  # x coordinate
             vy = int(vent_centroid[1])  # y coordinate
-            # Use MATLAB approach for fallback
+            # Fall back to angular boundary scanning.
             vent_pos, vent_neg = find_actual_major_axis_endpoints(vent_mask)
             if vent_pos is not None and vent_neg is not None:
                 # Calculate major angle from endpoints
@@ -208,7 +208,7 @@ def overlay_time_series(image_ts, mask_ts, stats_df, viz_data=None, output_dir=N
             p2 = (int(vx + dx_mj), int(vy + dy_mj))
             cv2.line(img_rgb, p1, p2, vent_major_color, line_width)
 
-        # Draw three minor axes (red) - exactly like MATLAB code
+        # Draw three minor axes in red.
         if vent_pos is not None and vent_neg is not None:
             # Calculate major axis vector and length
             major_vector = vent_pos - vent_neg
@@ -302,7 +302,7 @@ def overlay_time_series(image_ts, mask_ts, stats_df, viz_data=None, output_dir=N
             atr_top, atr_bottom = find_boundary_points((mask == 2).astype(np.uint8) * 255)
             
             if vent_pos is not None and vent_neg is not None and atr_top is not None and atr_bottom is not None:
-                # Determine ventricle top/bottom based on Y-coordinate (MATLAB logic)
+                # Determine ventricle top and bottom by Y coordinate.
                 if vent_pos[1] < vent_neg[1]:
                     vent_top = vent_pos
                     vent_bottom = vent_neg

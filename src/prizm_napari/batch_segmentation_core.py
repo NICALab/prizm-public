@@ -18,13 +18,13 @@ from tqdm import tqdm
 
 from prizm_napari.infer import PRIZMInference
 from prizm_napari.analysis import (
-    _matlab_preprocess_pdouble,
+    _preprocess_refinement_frame,
     compute_segmentation_statistics,
     compute_functional_statistics,
     compute_synchronize_analysis,
     combine_results,
-    derive_matlab_series_key,
-    matlab_style_perfish_dataframe,
+    derive_series_key,
+    perfish_export_dataframe,
     parse_xml_times_and_scale,
     save_gif_with_relative_times,
 )
@@ -223,7 +223,7 @@ def _to_gray_unit(img: np.ndarray, prefer_green: bool = True) -> np.ndarray:
         if prefer_green and arr.shape[2] >= 3:
             arr = arr[..., 1]
         else:
-            # MATLAB im2gray-like conversion for RGB during fine-center stage.
+            # Weighted RGB-to-gray conversion during the fine-center stage.
             if arr.shape[2] >= 3:
                 arr = (
                     0.2989 * arr[..., 0]
@@ -272,7 +272,7 @@ def _estimate_center_2stage(
     fine_thresh: float = 0.10,
 ) -> tuple[float, float]:
     """
-    MATLAB estimateCenter2stage parity approximation:
+    Two-stage center estimation:
     1) coarse threshold on green/full frame
     2) crop around coarse centroid
     3) stretch-like adjustment + fine threshold in ROI
@@ -381,10 +381,10 @@ def _save_input_visualizations(
 ) -> None:
     """Write the document-specified cropped, preprocessing, and labeled frames."""
     for frame_name, cropped, mask in zip(frame_names, cropped_frames, masks):
-        # The established output uses MATLAB im2gray semantics on the complete
+        # Use the established weighted grayscale conversion on the complete
         # RGB crop. This visualization is deliberately independent of the
         # model's selected segmentation channel.
-        preprocessed = to_uint8(_matlab_preprocess_pdouble(cropped))
+        preprocessed = to_uint8(_preprocess_refinement_frame(cropped))
         outputs = (
             ("cropped", "cropped", cropped),
             ("preprocessing", "preprocessing", preprocessed),
@@ -427,7 +427,7 @@ def _save_masked_gif(
     """Write the document-specified annotated masked GIF."""
     masked_frames = (
         segmentation_overlay(
-            to_uint8(_matlab_preprocess_pdouble(cropped)),
+            to_uint8(_preprocess_refinement_frame(cropped)),
             mask,
         )
         for cropped, mask in zip(cropped_frames, masks, strict=False)
@@ -606,7 +606,7 @@ def run_batch_segmentation_core(
             if date_str is None:
                 date_str = current_date
             video_name = f"{date_str}_{chemical_type}_{concentration}_{sample_id}"
-            matlab_file_key = derive_matlab_series_key(frames, fallback=sample_id)
+            series_key = derive_series_key(frames, fallback=sample_id)
 
             # Resolve acquisition scale before heart detection/cropping. The
             # resulting 300x300 frames have an effective scale determined by
@@ -769,7 +769,7 @@ def run_batch_segmentation_core(
                 show_progress=(progress_callback is None),
                 progress_desc=f"    {sample_dir} seg-stats",
                 return_cleaned_masks=True,
-                matlab_series_key=matlab_file_key,
+                series_key=series_key,
                 atrium_probabilities=atrium_probabilities,
                 visualization_format=visualization_format,
             )
@@ -800,10 +800,10 @@ def run_batch_segmentation_core(
             t0 = perf_counter()
             emit_log(f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: computing functional and synchrony analysis")
             v_df, vFS_df, a_df, fig_v, fig_vfs, fig_a, fig_va = compute_functional_statistics(
-                seg_df, video_name, sample_out, matlab_file_key=matlab_file_key
+                seg_df, video_name, sample_out, series_key=series_key
             )
             sync_df, fig_cav, fig_cc = compute_synchronize_analysis(
-                seg_df, video_name, sample_out, matlab_file_key=matlab_file_key
+                seg_df, video_name, sample_out, series_key=series_key
             )
             stage_times["func_sync_s"] = perf_counter() - t0
             emit_log(
@@ -818,7 +818,7 @@ def run_batch_segmentation_core(
             t0 = perf_counter()
             emit_log(f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: combining per-sample outputs")
             combined_df = combine_results(
-                video_name, seg_df, v_df, vFS_df, a_df, sync_df, sample_out, matlab_file_key=matlab_file_key
+                video_name, seg_df, v_df, vFS_df, a_df, sync_df, sample_out, series_key=series_key
             )
             batch_combined_list.append(combined_df)
             condition_combined_list.append(combined_df)
@@ -867,11 +867,11 @@ def run_batch_segmentation_core(
             os.makedirs(cond_results_dir, exist_ok=True)
             cond_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             cond_df = pd.concat(condition_combined_list, ignore_index=True)
-            matlab_perfish_df = matlab_style_perfish_dataframe(cond_df)
+            export_perfish_df = perfish_export_dataframe(cond_df)
             emit_log(
                 f"{chem_conc_dir}: writing condition workbook with {len(cond_df)} row(s) to results directory"
             )
-            matlab_perfish_df.to_excel(
+            export_perfish_df.to_excel(
                 os.path.join(cond_results_dir, f"PerFishMetrics_{chem_conc_dir}_{cond_timestamp}.xlsx"),
                 index=False,
             )

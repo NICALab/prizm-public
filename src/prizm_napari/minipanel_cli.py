@@ -14,7 +14,10 @@ from prizm_napari.minipanel_analysis import run_minipanel_analysis
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run PRIZM mini-panel + heatmap + LDA/PCA/t-SNE analysis"
+        description=(
+            "Run PRIZM major/minor mini-panels + heatmaps + LDA/PCA/t-SNE analysis "
+            "using the PRIZM 22-major/23-minor functional metric contract"
+        )
     )
     parser.add_argument("--data-dir", required=True, help="Directory with .xlsx files")
     parser.add_argument("--output-dir", default=None, help="Output directory")
@@ -78,6 +81,8 @@ def main():
     print(f"Output directory: {result['output_dir']}")
     print(f"Panel directory: {result['panel_dir']}")
     print(f"Stats file: {result['stats_xlsx']}")
+    for name, partition in result.get("partition_results", {}).items():
+        print(f"{name.title()} metrics: {partition['n_params']} | Stats: {partition['stats_xlsx']}")
     print(f"Groups: {result['n_groups']} | Params: {result['n_params']}")
     print("=" * 60)
 

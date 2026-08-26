@@ -10,10 +10,23 @@ htmlcov/
 .venv/
 venv/
 env/
+.env
+.env.*
+!.env.example
 
 build/
 dist/
 *.egg-info/
+
+*.onnx
+*.pt
+*.pth
+
+.idea/
+.vscode/
+*.log
+*.tmp
+*.bak
 
 .DS_Store
 Thumbs.db

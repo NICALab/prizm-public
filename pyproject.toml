@@ -3,16 +3,15 @@ name = "prizm-napari"
 dynamic = ["version"]
 description = "A napari plugin for PRIZM"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 authors = [
-  {name = "Joshua Yedam You"},
-  {email = "jyy20422@kaist.ac.kr"},
+  {name = "NICALab"},
 ]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Framework :: napari",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -37,6 +36,9 @@ dependencies = [
     "pandas",
     "scipy",
     "matplotlib",
+    "pillow",
+    "imageio",
+    "tifffile",
     "openpyxl",
     "segmentation-models-pytorch",
     "onnx",
@@ -49,15 +51,6 @@ dependencies = [
     "tqdm",
 ]
 
-[project.optional-dependencies]
-testing = [
-    "tox",
-    "pytest",  # https://docs.pytest.org/en/latest/contents.html
-    "pytest-cov",  # https://pytest-cov.readthedocs.io/en/latest/
-    "pytest-qt",  # https://pytest-qt.readthedocs.io/en/latest/
-    "napari",
-]
-
 [project.entry-points."napari.manifest"]
 prizm-napari = "prizm_napari:napari.yaml"
 
@@ -68,13 +61,13 @@ prizm-moa-2stage = "prizm_napari.moa_cli:main"
 prizm-minipanel-analysis = "prizm_napari.minipanel_cli:main"
 
 [project.urls]
-"Bug Tracker" = "https://github.com/NICALab/prizm-napari/issues"
-"Documentation" = "https://github.com/NICALab/prizm-napari#README.md"
-"Source Code" = "https://github.com/NICALab/prizm-napari"
-"User Support" = "https://github.com/NICALab/prizm-napari/issues"
+"Bug Tracker" = "https://github.com/NICALab/prizm-public/issues"
+"Documentation" = "https://github.com/NICALab/prizm-public#readme"
+"Source Code" = "https://github.com/NICALab/prizm-public"
+"User Support" = "https://github.com/NICALab/prizm-public/issues"
 
 [build-system]
-requires = ["setuptools>=42.0.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
