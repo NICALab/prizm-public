@@ -101,7 +101,7 @@ class PRIZMMiniPanelQWidget(QWidget):
         row += 1
 
         self.lbl_metric_contract = QLabel(
-            "Metrics: automatic PRIZM mapping (22 major + 23 minor). "
+            "Metrics: automatic PRIZM mapping (22 core + 23 extended). "
             "Entropy and count fields are excluded from functional figures.",
             self,
         )
@@ -382,8 +382,8 @@ class PRIZMMiniPanelQWidget(QWidget):
                     "Panel Directory": result.get("panel_dir"),
                     "Stats XLSX": result.get("stats_xlsx"),
                     "Metric Selection": result.get("metric_selection_xlsx"),
-                    "Major Parameters": result.get("partition_results", {}).get("major", {}).get("n_params"),
-                    "Minor Parameters": result.get("partition_results", {}).get("minor", {}).get("n_params"),
+                    "Core Parameters": result.get("partition_results", {}).get("core", {}).get("n_params"),
+                    "Extended Parameters": result.get("partition_results", {}).get("extended", {}).get("n_params"),
                     "Groups": result.get("n_groups"),
                     "Parameters": result.get("n_params"),
                     "CTRL Index (1-based)": result.get("ctrl_index_1based"),

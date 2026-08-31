@@ -9,6 +9,16 @@ import numpy as np
 
 EPSILON = 1e-7
 
+# Linear fit from the full annotated PRIZM dataset:
+# raw mean atrial Dice = intercept + slope * mean atrial segment entropy.
+# The QC cutoff is the entropy value where the fitted raw Dice equals 0.4.
+ATRIUM_ENTROPY_QC_DICE_CUTOFF = 0.4
+ATRIUM_ENTROPY_RAW_DICE_FIT_SLOPE = -3.0059063866503086
+ATRIUM_ENTROPY_RAW_DICE_FIT_INTERCEPT = 1.000781681138433
+ATRIUM_SEGMENT_ENTROPY_QC_THRESHOLD_NATS = (
+    ATRIUM_ENTROPY_QC_DICE_CUTOFF - ATRIUM_ENTROPY_RAW_DICE_FIT_INTERCEPT
+) / ATRIUM_ENTROPY_RAW_DICE_FIT_SLOPE
+
 
 def binary_entropy(probability: np.ndarray) -> np.ndarray:
     """Return binary Shannon entropy in nats (Mehrtash et al., Equation 7)."""
@@ -20,6 +30,14 @@ def binary_entropy(probability: np.ndarray) -> np.ndarray:
     return -probability * np.log(probability) - (1.0 - probability) * np.log(
         1.0 - probability
     )
+
+
+def atrium_segment_entropy_qc_flag(segment_entropy_mean: float) -> bool | float:
+    """Flag finite atrial segment entropy at or above the fitted QC cutoff."""
+    value = float(segment_entropy_mean)
+    if not math.isfinite(value):
+        return math.nan
+    return bool(value >= ATRIUM_SEGMENT_ENTROPY_QC_THRESHOLD_NATS)
 
 
 def cleaned_atrium_segment_entropy(
@@ -53,10 +71,15 @@ def cleaned_atrium_segment_entropy(
             "atrium_prediction_present": False,
             "segment_pixels": 0,
             "segment_entropy_mean": math.nan,
+            "segment_entropy_qc_flag": math.nan,
         }
     entropy = binary_entropy(probability)
+    segment_entropy_mean = float(np.mean(entropy[atrium_mask]))
     return {
         "atrium_prediction_present": True,
         "segment_pixels": pixels,
-        "segment_entropy_mean": float(np.mean(entropy[atrium_mask])),
+        "segment_entropy_mean": segment_entropy_mean,
+        "segment_entropy_qc_flag": atrium_segment_entropy_qc_flag(
+            segment_entropy_mean
+        ),
     }

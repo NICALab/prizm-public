@@ -36,11 +36,11 @@ from prizm_napari.plot_colors import distinct_categorical_colors, neutral_catego
 plt.rcParams["font.family"] = "Nimbus Sans"
 
 
-# PRIZM functional metric partition used by the major/minor reports.
+# PRIZM functional metric partition used by the core/extended reports.
 # Keep this explicit: substring-based numeric-column discovery incorrectly pulled
 # uncertainty/count outputs into the functional panels (and even treated the
 # ``id`` inside ``Valid`` as an identifier exclusion).
-MAJOR_METRICS: Tuple[str, ...] = (
+CORE_METRICS: Tuple[str, ...] = (
     "V_HR_bpm",
     "A_HR_bpm",
     "Interval_CV",
@@ -65,7 +65,7 @@ MAJOR_METRICS: Tuple[str, ...] = (
     "PLV",
 )
 
-MINOR_METRICS: Tuple[str, ...] = (
+EXTENDED_METRICS: Tuple[str, ...] = (
     "Interval_SD_s",
     "SystolicFraction",
     "EF_SD",
@@ -91,7 +91,7 @@ MINOR_METRICS: Tuple[str, ...] = (
     "AV_Delay_SD",
 )
 
-FUNCTIONAL_METRICS: Tuple[str, ...] = MAJOR_METRICS + MINOR_METRICS
+FUNCTIONAL_METRICS: Tuple[str, ...] = CORE_METRICS + EXTENDED_METRICS
 
 # Compact 5x5 tiles use a deliberately sparse number of y intervals.
 # Matplotlib's default locator uses many more ticks at the same physical tile
@@ -904,14 +904,14 @@ def _render_metric_partition(
     for i in range(n_p, len(axes)):
         axes[i].axis("off")
     suffix = str(partition_name).strip().lower()
-    if n_cols == 5 and n_rows == 5 and suffix in {"major", "minor"}:
-        # Established compact positions for the 22-major and 23-minor
+    if n_cols == 5 and n_rows == 5 and suffix in {"core", "extended"}:
+        # Established compact positions for the 22-core and 23-extended
         # partitions. Tight-layout is a different layout engine and visibly
         # changes tile widths and gaps.
         x0 = 0.065
         x_step = 0.18777514826757665
         tile_width = 0.12889940692969326
-        if suffix == "major":
+        if suffix == "core":
             y_top = 0.8103928540401532
             y_step = 0.19042611103861714
             tile_height = 0.14540695395049463
@@ -934,10 +934,10 @@ def _render_metric_partition(
 
     bar_png = panel_dir / f"mini_bar_panel_{suffix}.png"
     bar_target = None
-    if n_cols == 5 and suffix in {"major", "minor"}:
-        width_crop_in = 0.63143 if suffix == "major" else 0.74000
-        if suffix == "major":
-            # The standard major panel is eight pixels narrower at 350 dpi when
+    if n_cols == 5 and suffix in {"core", "extended"}:
+        width_crop_in = 0.63143 if suffix == "core" else 0.74000
+        if suffix == "core":
+            # The standard core panel is eight pixels narrower at 350 dpi when
             # it expands from four to five groups.
             width_crop_in += (8.0 / 350.0) * max(n_g - 4, 0)
         bar_target = (
@@ -967,7 +967,7 @@ def _render_metric_partition(
             figsize=(heat_width_in, heat_height_in),
             facecolor="white",
         )
-        standard_heatmap = suffix in {"major", "minor"} and n_g == 5
+        standard_heatmap = suffix in {"core", "extended"} and n_g == 5
         if standard_heatmap:
             # Crop the canvas around its decorations. These positions reproduce
             # the five-column matrix and colorbar geometry in the established
@@ -1042,8 +1042,8 @@ def _render_metric_partition(
             fig_heat.tight_layout(rect=(0.0, 0.0, 0.86, 1.0))
         heat_png = panel_dir / f"heatmap_{suffix}.png"
         heat_target = None
-        if suffix in {"major", "minor"}:
-            width_crop_in = 0.22571 if suffix == "major" else 0.22857
+        if suffix in {"core", "extended"}:
+            width_crop_in = 0.22571 if suffix == "core" else 0.22857
             heat_target = (
                 int(round((heat_width_in - width_crop_in) * dpi)),
                 int(round((heat_height_in - 0.86857) * dpi)),
@@ -1170,7 +1170,7 @@ def run_minipanel_analysis(
     if exclude_cols_exact is None:
         exclude_cols_exact = ("FileKey", "ID", "FishID")
     if exclude_cols_contains is None:
-        # Functional selection is governed by the explicit major/minor contract.
+        # Functional selection is governed by the explicit core/extended contract.
         # A generic ``id`` substring rule is unsafe (for example, it matches
         # ``Valid`` in an uncertainty-count column).
         exclude_cols_contains = ()
@@ -1224,12 +1224,12 @@ def run_minipanel_analysis(
         missing = [metric for metric in expected_metrics if metric not in common_vars]
         if missing:
             raise ValueError(
-                "The PRIZM major/minor MiniPanel contract requires all 45 functional metrics. "
+                "The PRIZM core/extended MiniPanel contract requires all 45 functional metrics. "
                 "Missing from one or more selected workbooks: "
                 + ", ".join(missing)
             )
         params = expected_metrics
-        partitions = {"major": list(MAJOR_METRICS), "minor": list(MINOR_METRICS)}
+        partitions = {"core": list(CORE_METRICS), "extended": list(EXTENDED_METRICS)}
     n_p = len(params)
 
     ctrl_idx = find_ctrl_idx(group_names, control_group_name)
@@ -1283,7 +1283,7 @@ def run_minipanel_analysis(
             "Metric": metric,
             "Partition": selected_partition.get(metric, ""),
             "Selected": metric in selected_partition,
-            "Reason": "PRIZM major/minor mapping" if metric in selected_partition else "Not a mapped functional metric",
+            "Reason": "PRIZM core/extended mapping" if metric in selected_partition else "Not a mapped functional metric",
         }
         for metric in common_vars
     ]

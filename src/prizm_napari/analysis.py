@@ -21,7 +21,10 @@ from prizm_napari.output_utils import (
     save_visualization,
     visualization_name,
 )
-from prizm_napari.uncertainty import cleaned_atrium_segment_entropy
+from prizm_napari.uncertainty import (
+    atrium_segment_entropy_qc_flag,
+    cleaned_atrium_segment_entropy,
+)
 
 # ----------------------------
 # Global visual/style settings
@@ -86,6 +89,7 @@ FRAME_EXPORT_COLUMNS = [
     "AtriumPredictionPresent",
     "AtriumSegmentPixels",
     "AtriumSegmentEntropyMean_nats",
+    "AtriumSegmentEntropyQCFlag",
 ]
 
 PERFISH_EXPORT_COLUMNS = [
@@ -136,6 +140,7 @@ PERFISH_EXPORT_COLUMNS = [
     "AV_Delay_Mean",
     "AV_Delay_SD",
     "AtriumSegmentEntropyMean_nats",
+    "AtriumSegmentEntropyQCFlag",
     "AtriumSegmentEntropyMax_nats",
     "AtriumSegmentEntropyP95_nats",
     "AtriumSegmentEntropyValidFrames",
@@ -149,7 +154,9 @@ def _save_svg(fig, path, dpi=300):
     fig.savefig(path, format='svg', dpi=dpi)   # fixed canvas every time
 
 
-def summarize_segmentation_uncertainty(seg_df: pd.DataFrame) -> dict[str, float | int]:
+def summarize_segmentation_uncertainty(
+    seg_df: pd.DataFrame,
+) -> dict[str, float | bool | int]:
     """Aggregate the recorded per-frame atrial entropy values."""
     entropy = pd.to_numeric(
         seg_df.get(
@@ -166,9 +173,11 @@ def summarize_segmentation_uncertainty(seg_df: pd.DataFrame) -> dict[str, float 
     else:
         missing_frames = int(len(seg_df))
 
+    mean_entropy = float(np.mean(finite_entropy)) if finite_entropy.size else np.nan
     return {
-        "AtriumSegmentEntropyMean_nats": (
-            float(np.mean(finite_entropy)) if finite_entropy.size else np.nan
+        "AtriumSegmentEntropyMean_nats": mean_entropy,
+        "AtriumSegmentEntropyQCFlag": atrium_segment_entropy_qc_flag(
+            mean_entropy
         ),
         "AtriumSegmentEntropyMax_nats": (
             float(np.max(finite_entropy)) if finite_entropy.size else np.nan
@@ -230,6 +239,14 @@ def segmentation_export_dataframe(seg_stats_df: pd.DataFrame) -> pd.DataFrame:
     out["AtriumSegmentEntropyMean_nats"] = seg_stats_df.get(
         "AtriumSegmentEntropyMean_nats", np.nan
     )
+    if "AtriumSegmentEntropyQCFlag" in seg_stats_df.columns:
+        out["AtriumSegmentEntropyQCFlag"] = seg_stats_df[
+            "AtriumSegmentEntropyQCFlag"
+        ]
+    else:
+        out["AtriumSegmentEntropyQCFlag"] = pd.to_numeric(
+            out["AtriumSegmentEntropyMean_nats"], errors="coerce"
+        ).map(atrium_segment_entropy_qc_flag)
     return out.loc[:, FRAME_EXPORT_COLUMNS]
 
 
@@ -243,6 +260,10 @@ def perfish_export_dataframe(perfish_df: pd.DataFrame) -> pd.DataFrame:
         out["FileKey"] = ""
     for col in PERFISH_EXPORT_COLUMNS[1:]:
         out[col] = perfish_df[col] if col in perfish_df.columns else np.nan
+    if "AtriumSegmentEntropyQCFlag" not in perfish_df.columns:
+        out["AtriumSegmentEntropyQCFlag"] = pd.to_numeric(
+            out["AtriumSegmentEntropyMean_nats"], errors="coerce"
+        ).map(atrium_segment_entropy_qc_flag)
     return out.loc[:, PERFISH_EXPORT_COLUMNS]
 
 # Analysis pipeline
@@ -1655,6 +1676,7 @@ def compute_segmentation_statistics(
                 "atrium_prediction_present": atrium_pixels > 0,
                 "segment_pixels": atrium_pixels,
                 "segment_entropy_mean": np.nan,
+                "segment_entropy_qc_flag": np.nan,
             }
         else:
             uncertainty_i = cleaned_atrium_segment_entropy(
@@ -1729,6 +1751,9 @@ def compute_segmentation_statistics(
             "AtriumSegmentEntropyMean_nats": float(
                 uncertainty_i["segment_entropy_mean"]
             ),
+            "AtriumSegmentEntropyQCFlag": uncertainty_i[
+                "segment_entropy_qc_flag"
+            ],
         })
 
         fs_frames_bgr.append(fs_overlay_i)

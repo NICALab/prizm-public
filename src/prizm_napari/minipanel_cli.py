@@ -15,8 +15,8 @@ from prizm_napari.minipanel_analysis import run_minipanel_analysis
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Run PRIZM major/minor mini-panels + heatmaps + LDA/PCA/t-SNE analysis "
-            "using the PRIZM 22-major/23-minor functional metric contract"
+            "Run PRIZM core/extended mini-panels + heatmaps + LDA/PCA/t-SNE analysis "
+            "using the PRIZM 22-core/23-extended functional metric contract"
         )
     )
     parser.add_argument("--data-dir", required=True, help="Directory with .xlsx files")

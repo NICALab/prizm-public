@@ -457,9 +457,9 @@ prizm-minipanel-analysis \
   --output-dir /path/to/prizm_minipanel_output
 ```
 
-Expected MiniPanel output includes separate `mini_bar_panel_major.*` and
-`mini_bar_panel_minor.*` figures, separate `heatmap_major.*` and
-`heatmap_minor.*` figures, corresponding `stats_significance_*.xlsx` files,
+Expected MiniPanel output includes separate `mini_bar_panel_core.*` and
+`mini_bar_panel_extended.*` figures, separate `heatmap_core.*` and
+`heatmap_extended.*` figures, corresponding `stats_significance_*.xlsx` files,
 `LDA_REPORT/`, and `FIGURES_300dpi/` outputs.
 
 ## GUI Usage
@@ -613,7 +613,7 @@ Basic workflow:
    - enable `Save all pairwise Welch t-tests` only if the extra all-pairs
      tables are needed. It is off by default.
 5. Review the selected-workbook order and the control/reference summary.
-   MiniPanel automatically uses the PRIZM 22-major/23-minor functional
+   MiniPanel automatically uses the PRIZM 22-core/23-extended functional
    metric mapping; segmentation-entropy and count fields are not included in
    these functional figures.
 6. Set `Output Directory`. If left blank, PRIZM creates a timestamped
@@ -624,7 +624,7 @@ Basic workflow:
 8. Click `Run MiniPanel Analysis`. When it finishes, napari displays a
    summary with the output paths.
 
-The output directory contains separate major/minor MiniPanels, heatmaps, and
+The output directory contains separate core/extended MiniPanels, heatmaps, and
 statistics workbooks under `panel_heatmap/`, plus `metric_selection.xlsx`,
 `LDA_REPORT/`, and `FIGURES_300dpi/` for the enabled analyses.
 

@@ -210,6 +210,13 @@ def canon_names(names: Sequence[str]) -> np.ndarray:
     return np.asarray(out, dtype=object)
 
 
+_NON_FUNCTIONAL_OUTPUT_PREFIXES = (
+    "atriumsegmententropy",
+    "atriumpredictionmissingframes",
+    "segmentationuncertainty",
+)
+
+
 def read_params(xlsx_path: str | Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     df = pd.read_excel(xlsx_path)
     if df.empty:
@@ -227,6 +234,14 @@ def read_params(xlsx_path: str | Path) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     disp_names = []
     for idx, col in enumerate(columns):
         if idx == sample_col_idx:
+            continue
+        canonical_col = str(canon_names([col])[0])
+        if any(
+            canonical_col.startswith(prefix)
+            for prefix in _NON_FUNCTIONAL_OUTPUT_PREFIXES
+        ):
+            # Entropy values, QC flags, and related counts are output/QC
+            # metadata, not cardiac functional features for MoA fitting.
             continue
         ser = df.iloc[:, idx]
         is_num = pd.api.types.is_numeric_dtype(ser)
