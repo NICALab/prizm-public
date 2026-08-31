@@ -239,7 +239,7 @@ def read_params(xlsx_path: str | Path) -> Tuple[np.ndarray, np.ndarray, np.ndarr
         if any(
             canonical_col.startswith(prefix)
             for prefix in _NON_FUNCTIONAL_OUTPUT_PREFIXES
-        ):
+        ) or canonical_col.endswith("qcflag"):
             # Entropy values, QC flags, and related counts are output/QC
             # metadata, not cardiac functional features for MoA fitting.
             continue

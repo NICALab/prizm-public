@@ -128,7 +128,12 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, List[s
     # Get feature columns (exclude metadata and File Name)
     exclude_cols = ['File Name', 'date', 'chemical_type', 'concentration', 
                     'session_id', 'source_file']
-    feature_cols = [col for col in df.columns if col not in exclude_cols]
+    feature_cols = [
+        col
+        for col in df.columns
+        if col not in exclude_cols
+        and not str(col).lower().endswith("qcflag")
+    ]
     
     # Extract features
     X = df[feature_cols].copy()

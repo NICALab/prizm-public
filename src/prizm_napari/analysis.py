@@ -25,6 +25,7 @@ from prizm_napari.uncertainty import (
     atrium_segment_entropy_qc_flag,
     cleaned_atrium_segment_entropy,
 )
+from prizm_napari.quality_control import QC_FLAG_COLUMNS
 
 # ----------------------------
 # Global visual/style settings
@@ -145,6 +146,7 @@ PERFISH_EXPORT_COLUMNS = [
     "AtriumSegmentEntropyP95_nats",
     "AtriumSegmentEntropyValidFrames",
     "AtriumPredictionMissingFrames",
+    *QC_FLAG_COLUMNS,
 ]
 
 def _save_svg(fig, path, dpi=300):
@@ -3023,7 +3025,8 @@ def combine_results(video_name: str,
                     a_df: pd.DataFrame,
                     sync_df: pd.DataFrame,
                     video_out: str,
-                    series_key: Optional[str] = None) -> pd.DataFrame:
+                    series_key: Optional[str] = None,
+                    quality_control: Optional[dict[str, bool]] = None) -> pd.DataFrame:
     """
     Build one combined row per video using the established PRIZM column schema
     and save it under <video_out>/results.
@@ -3300,9 +3303,30 @@ def combine_results(video_name: str,
     for column, value in summarize_segmentation_uncertainty(seg_df).items():
         combined_df[column] = value
 
-    preferred_order = ["FileKey"] + [c for c in PERFISH_EXPORT_COLUMNS if c != "FileKey"] + [
-        c for c in combined_df.columns if c not in (["FileKey"] + [c for c in PERFISH_EXPORT_COLUMNS if c != "FileKey"])
+    quality_control = quality_control or {}
+    for column in QC_FLAG_COLUMNS:
+        combined_df[column] = (
+            bool(quality_control[column])
+            if column in quality_control
+            else np.nan
+        )
+
+    standardized_columns = [
+        column
+        for column in PERFISH_EXPORT_COLUMNS
+        if column not in ({"FileKey"} | set(QC_FLAG_COLUMNS))
     ]
+    reserved_columns = {"FileKey", *standardized_columns, *QC_FLAG_COLUMNS}
+    preferred_order = (
+        ["FileKey"]
+        + standardized_columns
+        + [
+            column
+            for column in combined_df.columns
+            if column not in reserved_columns
+        ]
+        + list(QC_FLAG_COLUMNS)
+    )
     combined_df = combined_df.loc[:, preferred_order]
 
     # ----------------------------

@@ -35,6 +35,12 @@ from prizm_napari.output_utils import (
     to_uint8,
     visualization_name,
 )
+from prizm_napari.quality_control import (
+    check_focus_qc,
+    check_frame_interval_qc,
+    check_low_signal_qc,
+    check_segmentation_regions_qc,
+)
 
 
 VALID_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
@@ -673,6 +679,10 @@ def run_batch_segmentation_core(
             else:
                 imgs = [_read_frame_fast(os.path.join(sample_path, fn), as_gray=grayscale) for fn in frames]
 
+            # Signal QC must use the raw, absolute image intensities before
+            # center cropping or adaptive contrast preprocessing.
+            low_signal_qc = check_low_signal_qc(imgs)
+
             if imgs:
                 est_center = _estimate_center_2stage(
                     imgs[0],
@@ -741,6 +751,9 @@ def run_batch_segmentation_core(
                 masks,
                 visualization_format,
             )
+            focus_qc = check_focus_qc(
+                os.path.join(sample_out, "preprocessing")
+            )
             gif_relative_times = _relative_times_for_frames(
                 relative_times,
                 len(frames),
@@ -787,6 +800,29 @@ def run_batch_segmentation_core(
             emit_log(f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: saving cleaned segmentation mask")
             cleaned_mask_path = os.path.join(sample_out, f"{video_name}_segmentation_cleaned.tif")
             tifffile.imwrite(cleaned_mask_path, cleaned_masks.astype(np.uint8, copy=False))
+            segmentation_regions_qc = check_segmentation_regions_qc(cleaned_masks)
+            frame_interval_qc = check_frame_interval_qc(
+                relative_times,
+                frame_interval=frame_interval,
+            )
+            quality_control_flags = {
+                "LowSignalQCFlag": low_signal_qc["flag"],
+                "SegmentationErrorQCFlag": segmentation_regions_qc["flag"],
+                "InsufficientFramesQCFlag": frame_interval_qc["flag"],
+                "OutOfFocusQCFlag": focus_qc["flag"],
+            }
+            emit_log(
+                f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: "
+                "QC | "
+                f"low signal={quality_control_flags['LowSignalQCFlag']} "
+                f"(mean frame maximum={low_signal_qc['mean_frame_maximum_gray']:.3f}) | "
+                f"segmentation error={quality_control_flags['SegmentationErrorQCFlag']} "
+                f"(multi-region frames={segmentation_regions_qc['frames_with_multiple_regions']}) | "
+                f"insufficient frames={quality_control_flags['InsufficientFramesQCFlag']} "
+                f"(interval={frame_interval_qc['frame_interval_seconds'] * 1000.0:.3f} ms) | "
+                f"out of focus={quality_control_flags['OutOfFocusQCFlag']} "
+                f"(mean Tenengrad={focus_qc['mean_tenengrad']:.3f})"
+            )
             stage_times["save_cleaned_mask_s"] = perf_counter() - t0
             emit_log(
                 f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: "
@@ -818,7 +854,15 @@ def run_batch_segmentation_core(
             t0 = perf_counter()
             emit_log(f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: combining per-sample outputs")
             combined_df = combine_results(
-                video_name, seg_df, v_df, vFS_df, a_df, sync_df, sample_out, series_key=series_key
+                video_name,
+                seg_df,
+                v_df,
+                vFS_df,
+                a_df,
+                sync_df,
+                sample_out,
+                series_key=series_key,
+                quality_control=quality_control_flags,
             )
             batch_combined_list.append(combined_df)
             condition_combined_list.append(combined_df)
