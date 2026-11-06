@@ -126,8 +126,8 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, List[s
     Excludes metadata columns and 'File Name'.
     """
     # Get feature columns (exclude metadata and File Name)
-    exclude_cols = ['File Name', 'date', 'chemical_type', 'concentration', 
-                    'session_id', 'source_file']
+    exclude_cols = ['File Name', 'FileKey', 'date', 'chemical_type', 'concentration',
+                    'session_id', 'source_file', 'SVBA_BodyTilt_deg']
     feature_cols = [
         col
         for col in df.columns

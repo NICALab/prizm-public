@@ -19,6 +19,9 @@ from tqdm import tqdm
 from prizm_napari.infer import PRIZMInference
 from prizm_napari.analysis import (
     _preprocess_refinement_frame,
+    _orientation_session,
+    ORIENTATION_N_FRAMES,
+    video_body_tilt_deg,
     compute_segmentation_statistics,
     compute_functional_statistics,
     compute_synchronize_analysis,
@@ -478,6 +481,8 @@ def run_batch_segmentation_core(
     This is the exact same code that the GUI uses, extracted into a shared function.
     """
     visualization_format = normalize_visualization_format(visualization_format)
+    if model_type.lower() not in {"onnx", "auto"} or not str(model_path).lower().endswith(".onnx"):
+        raise ValueError("Batch analysis requires the PRIZM-DeepLab ONNX model with the head_vec output.")
     infer = PRIZMInference(
         model_path,
         model_type=model_type,
@@ -492,6 +497,9 @@ def run_batch_segmentation_core(
         infer_batch_size=infer_batch_size,
         use_amp=use_amp,
     )
+
+    orient_path = getattr(infer, "onnx_model_path", None) or model_path
+    _orientation_session(orient_path)
 
     def emit_log(message: str):
         if progress_callback:
@@ -771,6 +779,13 @@ def run_batch_segmentation_core(
             # 4) Segmentation statistics
             t0 = perf_counter()
             emit_log(f"[{sample_index}/{total_samples}] {chem_conc_dir}/{sample_dir}: computing segmentation statistics")
+            pre_frames = [
+                to_uint8(_preprocess_refinement_frame(frame))
+                for frame in imgs[:ORIENTATION_N_FRAMES]
+            ]
+            body_tilt_deg = video_body_tilt_deg(pre_frames, orient_path)
+            if not np.isfinite(body_tilt_deg):
+                raise ValueError(f"No finite head angle could be estimated for {sample_dir}.")
             seg_df, fs_overlay, cleaned_masks = compute_segmentation_statistics(
                 stack,
                 masks,
@@ -784,6 +799,7 @@ def run_batch_segmentation_core(
                 return_cleaned_masks=True,
                 series_key=series_key,
                 atrium_probabilities=atrium_probabilities,
+                body_tilt_deg=body_tilt_deg,
                 visualization_format=visualization_format,
             )
             stage_times["seg_stats_s"] = perf_counter() - t0

@@ -130,7 +130,7 @@ class PRIZMBatchSegmentationQWidget(QWidget):
         self.le_model_path = QLineEdit()
         self.le_model_path.setReadOnly(True)
         self.le_model_path.setText(DEFAULT_BATCH_MODEL_PATH)
-        self.le_model_path.setPlaceholderText("Browse to a .onnx or .pth segmentation model")
+        self.le_model_path.setPlaceholderText("Browse to the PRIZM-DeepLab orientation ONNX model")
         btn_model = QPushButton("Browse Model...", self)
         btn_model.clicked.connect(self._browse_model_file)
         layout.addWidget(QLabel("Model File"), 5, 0)
@@ -138,7 +138,7 @@ class PRIZMBatchSegmentationQWidget(QWidget):
         layout.addWidget(btn_model, 5, 2)
 
         self.cb_model_type = QComboBox()
-        self.cb_model_type.addItems(["onnx", "pth", "auto"])
+        self.cb_model_type.addItems(["onnx", "auto"])
         self.cb_model_type.setCurrentText("onnx")
         self.cb_model_type.currentIndexChanged.connect(self._on_model_type_changed)
         layout.addWidget(QLabel("Model Type"), 6, 0)
@@ -382,15 +382,13 @@ class PRIZMBatchSegmentationQWidget(QWidget):
             self,
             "Select Model File",
             "",
-            "Model Files (*.onnx *.pth);;ONNX Model Files (*.onnx);;PyTorch Model Files (*.pth);;All Files (*)",
+            "ONNX Model Files (*.onnx)",
         )
         if f:
             self.le_model_path.setText(f)
             suffix = os.path.splitext(f)[1].lower()
             if suffix == ".onnx":
                 self.cb_model_type.setCurrentText("onnx")
-            elif suffix == ".pth":
-                self.cb_model_type.setCurrentText("pth")
             self._sync_model_backend_ui()
 
     @thread_worker

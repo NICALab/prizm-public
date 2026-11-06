@@ -54,6 +54,74 @@ COLOR_CC_LAG   = 'r'
 _AX_RECT = dict(left=0.07, right=0.995, top=0.90, bottom=0.22)
 MINOR_AXIS_FRAC_OFFSETS = tuple(np.linspace(-0.15, 0.15, 9))
 
+ORIENTATION_OUTPUT = "head_vec"
+ORIENTATION_N_FRAMES = 20
+ORIENTATION_IMG = 300
+_ORIENTATION_SESSIONS = {}
+
+
+def body_axis_svba_points(v_boundary, a_boundary, tilt_deg):
+    """(ventricle-top, atrium-bottom) points with 'up' = image up rotated clockwise by tilt_deg,
+    or None. tilt_deg = 0 reproduces the original SV-BA (X,Y) points exactly."""
+    if v_boundary is None or a_boundary is None or len(v_boundary) == 0 or len(a_boundary) == 0:
+        return None
+    if not np.isfinite(tilt_deg):
+        return None
+    t = math.radians(tilt_deg)
+    up = np.array([math.sin(t), -math.cos(t)])  # (x, y) image coords, y down
+    v = np.asarray(v_boundary, dtype=float)
+    a = np.asarray(a_boundary, dtype=float)
+    return v[int(np.argmax(v @ up))], a[int(np.argmin(a @ up))]
+
+
+def _orientation_session(model_path):
+    """CPU session on the segmentation model; raises if it has no head-direction output."""
+    if model_path not in _ORIENTATION_SESSIONS:
+        import onnxruntime as ort
+        sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        if ORIENTATION_OUTPUT not in [o.name for o in sess.get_outputs()]:
+            raise ValueError(
+                f"Segmentation model has no '{ORIENTATION_OUTPUT}' output: {model_path}\n"
+                "Select the PRIZM-DeepLab orientation ONNX model with the head-direction output.")
+        _ORIENTATION_SESSIONS[model_path] = sess
+    return _ORIENTATION_SESSIONS[model_path]
+
+
+def _orientation_input(frame):
+    """Normalize to [0,1], resize with PIL bilinear sampling, and apply a disk mask."""
+    a = np.asarray(frame, dtype=np.float32)
+    if a.ndim == 3:
+        a = a.mean(axis=2)
+    lo, hi = float(a.min()), float(a.max())
+    a = (a - lo) / (hi - lo) if hi > lo else np.zeros_like(a)
+    a = np.asarray(Image.fromarray(a).resize((ORIENTATION_IMG, ORIENTATION_IMG), Image.BILINEAR))
+    c = (ORIENTATION_IMG - 1) / 2.0
+    yy, xx = np.mgrid[:ORIENTATION_IMG, :ORIENTATION_IMG]
+    return (a * (((yy - c) ** 2 + (xx - c) ** 2) <= (ORIENTATION_IMG / 2.0) ** 2))[None].astype(np.float32)
+
+
+def video_body_tilt_deg(pre_frames, model_path):
+    """Per-video in-plane tilt (deg, clockwise +, in [-180, 180)): circular mean of the predicted
+    head direction over the first ORIENTATION_N_FRAMES 'preprocessing' frames (uint8 grayscale).
+    model_path is the segmentation ONNX. NaN if there are no frames."""
+    frames = list(pre_frames)[:ORIENTATION_N_FRAMES]
+    if not frames:
+        return np.nan
+    x = np.stack([_orientation_input(f) for f in frames])
+    sess = _orientation_session(model_path)
+    seg_in = sess.get_inputs()[0]  # required segmentation input; a 1-frame dummy, the mask output is not fetched
+    dummy = np.zeros([1] + [d if isinstance(d, int) else 1 for d in seg_in.shape[1:]], np.float32)
+    v = sess.run([ORIENTATION_OUTPUT], {"image": x, seg_in.name: dummy})[0]
+    z = np.exp(1j * np.arctan2(v[:, 1], v[:, 0])).mean()  # model output is (cos, sin) of the clock angle
+    return (math.degrees(math.atan2(z.imag, z.real)) + 180.0) % 360.0 - 180.0
+
+
+def body_axis_svba_px(v_boundary, a_boundary, tilt_deg):
+    """Ventricle-top to atrium-bottom distance (px) on the body axis; see body_axis_svba_points."""
+    pts = body_axis_svba_points(v_boundary, a_boundary, tilt_deg)
+    return np.nan if pts is None else float(np.linalg.norm(pts[0] - pts[1]))
+
+
 FRAME_EXPORT_COLUMNS = [
     "FileName",
     "RelativeTime",
@@ -70,7 +138,8 @@ FRAME_EXPORT_COLUMNS = [
     "ACentroid_real_1",
     "ACentroid_real_2",
     "SVBA_Distance",
-    "SVBA_Distance_Y",
+    "SVBA_Distance_BodyAxis",
+    "SVBA_BodyTilt_deg",
     "MajorAxisLength",
     "MinorAxis_center",
     "MinorAxis_upper",
@@ -117,7 +186,8 @@ PERFISH_EXPORT_COLUMNS = [
     "ContractilitySpeed",
     "RelaxationSpeed",
     "SVBA_Distance_mean",
-    "SVBA_Distance_Y_mean",
+    "SVBA_Distance_BodyAxis_mean",
+    "SVBA_BodyTilt_deg",
     "A_ED_mean",
     "A_ES_mean",
     "A_ED_SD",
@@ -219,7 +289,8 @@ def segmentation_export_dataframe(seg_stats_df: pd.DataFrame) -> pd.DataFrame:
     out["ACentroid_real_1"] = seg_stats_df.get("ACentroid_real_X", np.nan)
     out["ACentroid_real_2"] = seg_stats_df.get("ACentroid_real_Y", np.nan)
     out["SVBA_Distance"] = seg_stats_df.get("SVBA_Distance", seg_stats_df.get("VentricleAtriumDistance", np.nan))
-    out["SVBA_Distance_Y"] = seg_stats_df.get("SVBA_Distance_Y", seg_stats_df.get("VentricleAtriumYDistance", np.nan))
+    out["SVBA_Distance_BodyAxis"] = seg_stats_df.get("SVBA_Distance_BodyAxis", np.nan)
+    out["SVBA_BodyTilt_deg"] = seg_stats_df.get("SVBA_BodyTilt_deg", np.nan)
     out["MajorAxisLength"] = seg_stats_df.get("MajorAxisLength", seg_stats_df.get("majorAxisLength", np.nan))
     out["MinorAxis_center"] = seg_stats_df.get("MinorAxis_center", seg_stats_df.get("minorAxis_center", np.nan))
     out["MinorAxis_upper"] = seg_stats_df.get("MinorAxis_upper", seg_stats_df.get("minorAxis_upper", np.nan))
@@ -479,6 +550,7 @@ def compute_segmentation_stats(
     prev_major_angle: float | None = None,
     anchor_major_angle: float | None = None,
     axis_mode: str = "scan",  # "scan" (original) or "ellipse"
+    axis_offset_deg: float = 0.0,
 ):
     """
     Measure a single frame and return its fractional-shortening overlay.
@@ -500,6 +572,8 @@ def compute_segmentation_stats(
     axis_mode : {"scan","ellipse"}
         "scan": original marching approach (default).
         "ellipse": estimate ventricle axes via cv2.fitEllipse and compute minor chords analytically.
+    axis_offset_deg : float
+        Clockwise head angle used for the axis search, landmarks, and V-A angles.
 
     Returns
     -------
@@ -621,11 +695,15 @@ def compute_segmentation_stats(
         ys = np.convolve(ys, kernel, mode="valid")
         return np.column_stack([xs, ys])
 
+    # Clockwise head angle, with image up at zero degrees.
+    body_tilt = axis_offset_deg if np.isfinite(axis_offset_deg) else 0.0
+    body_up = np.array([math.sin(math.radians(body_tilt)), -math.cos(math.radians(body_tilt))])
+
     def atrium_points(mask_bool):
         """
         Atrium landmark selection:
         - centroid from largest-area connected component
-        - top/bottom from the longest boundary on the full mask
+        - top/bottom along the body axis on the longest boundary of the full mask
         """
         cent = (float("nan"), float("nan"))
         bottom_pt = (float("nan"), float("nan"))
@@ -637,9 +715,9 @@ def compute_segmentation_stats(
 
         boundary = longest_boundary(mask_bool)
         if boundary is not None and len(boundary) > 0:
-            by = boundary[:, 1]
-            i_max = int(np.argmax(by))
-            i_min = int(np.argmin(by))
+            up_proj = boundary[:, :2].astype(float) @ body_up
+            i_max = int(np.argmin(up_proj))  # bottom
+            i_min = int(np.argmax(up_proj))  # top
             bottom_pt = (float(boundary[i_max, 0]), float(boundary[i_max, 1]))
             top_pt = (float(boundary[i_min, 0]), float(boundary[i_min, 1]))
 
@@ -784,7 +862,7 @@ def compute_segmentation_stats(
         return best_angle, best_pos, best_neg, max_dist
 
     def ventricle_top_bottom_on_major(best_pos_major, best_neg_major):
-        if best_pos_major[1] < best_neg_major[1]:
+        if float(np.dot(best_pos_major, body_up)) > float(np.dot(best_neg_major, body_up)):
             return best_pos_major, best_neg_major
         return best_neg_major, best_pos_major
 
@@ -795,7 +873,7 @@ def compute_segmentation_stats(
         maj_clock = _clock_angle_deg(v_bottom, v_top)
         raw_clock = _clock_angle_deg(v_bottom, a_point)
         major_rel = wrap360(raw_clock - maj_clock)
-        return dist, major_rel, raw_clock
+        return dist, major_rel, wrap360(raw_clock - body_tilt)
 
     def keep_seed_connected_component(mask_bool, seed_mask_bool):
         m = np.asarray(mask_bool, dtype=bool)
@@ -934,6 +1012,8 @@ def compute_segmentation_stats(
     ) = heart_vtop_abottom_distance(
         frame_img, vent_mask, atrium_mask
     )
+    stats["_svba_v_boundary"] = vwhole_boundary
+    stats["_svba_a_boundary"] = awhole_boundary
 
     # ---- Draw the established fractional-shortening overlay order ----
     if heart_boundary is not None and len(heart_boundary) >= 3:
@@ -1065,7 +1145,7 @@ def compute_segmentation_stats(
                     axis_center = np.array([float(x0), float(y0)], dtype=float)
 
             if prev_major_angle is None or (isinstance(prev_major_angle, float) and math.isnan(prev_major_angle)):
-                coarse_range = np.arange(65.0, 178.0 + 1e-6, 3.0)
+                coarse_range = np.mod(np.arange(65.0, 178.0 + 1e-6, 3.0) + body_tilt, 180.0)
                 coarse_angle, _, _, _ = search_best_axis_angle(v_contour, (axis_center[0], axis_center[1]), coarse_range)
                 if not np.isfinite(coarse_angle):
                     return stats, fs, prev_major_angle, anchor_major_angle
@@ -1150,20 +1230,6 @@ def compute_segmentation_stats(
         cv2.polylines(fs, [np.round(vwhole_boundary).astype(np.int32)], isClosed=True, color=CYAN, thickness=2)
     if awhole_boundary is not None and len(awhole_boundary) >= 3:
         cv2.polylines(fs, [np.round(awhole_boundary).astype(np.int32)], isClosed=True, color=MAGENTA, thickness=2)
-
-    if (
-        np.all(np.isfinite(vtop_whole))
-        and np.all(np.isfinite(abottom_whole))
-    ):
-        cv2.line(
-            fs,
-            (int(round(vtop_whole[0])), int(round(vtop_whole[1]))),
-            (int(round(abottom_whole[0])), int(round(abottom_whole[1]))),
-            color=RED,
-            thickness=3,
-        )
-        cv2.circle(fs, (int(round(vtop_whole[0])), int(round(vtop_whole[1]))), radius=7, color=RED, thickness=1)
-        cv2.circle(fs, (int(round(abottom_whole[0])), int(round(abottom_whole[1]))), radius=7, color=YELL, thickness=1)
 
     return stats, fs, prev_major_angle, anchor_major_angle
 
@@ -1552,12 +1618,14 @@ def compute_segmentation_statistics(
     series_key: Optional[str] = None,
     atrium_probabilities: Optional[np.ndarray] = None,
     visualization_format: str = "jpg",
+    body_tilt_deg: float = np.nan,
 ):
     """
     stack : (T,H,W) uint8/float array (grayscale frames)
     masks : (T,H,W) int/uint8 with labels {0:bg, 1:ventricle, 2:atrium}
     atrium_probabilities : optional (T,H,W) atrial class probabilities
     visualization_format : format for unannotated per-frame FS exports
+    body_tilt_deg : clockwise head angle; NaN leaves body-axis SV-BA unavailable
     """
     num_images = masks.shape[0]
     if meta_file is not None and meta_info is None:
@@ -1605,6 +1673,7 @@ def compute_segmentation_statistics(
     cleaned_masks = [] if return_cleaned_masks else None
     minor_axis_candidates = []
     minor_axis_segments = []
+    svba_boundaries = []
 
     # Track major-axis state between frames in the same sample.
     prev_major_angle = None
@@ -1663,6 +1732,7 @@ def compute_segmentation_statistics(
             prev_major_angle,
             anchor_major_angle,
             axis_mode,
+            axis_offset_deg=body_tilt_deg,
         )
 
         frame_name = fnames[i] if fnames is not None else os.path.basename(experiment_id)
@@ -1720,9 +1790,7 @@ def compute_segmentation_statistics(
             "AtriumCentroid_Real_X": stats_i["AtriumCentroid_real"][0],
             "AtriumCentroid_Real_Y": stats_i["AtriumCentroid_real"][1],
             "VentricleAtriumDistance": stats_i["VentricleAtriumDistance"],
-            "VentricleAtriumYDistance": stats_i["VentricleAtriumYDistance"],
             "SVBA_Distance": stats_i["VentricleAtriumDistance"],
-            "SVBA_Distance_Y": stats_i["VentricleAtriumYDistance"],
             "majorAxisLength": stats_i["majorAxisLength"],
             "minorAxis_center": stats_i["minorAxis_center"],
             "minorAxis_upper": stats_i["minorAxis_upper"],
@@ -1761,6 +1829,7 @@ def compute_segmentation_statistics(
         fs_frames_bgr.append(fs_overlay_i)
         minor_axis_candidates.append(stats_i.get("_minor_axis_lengths"))
         minor_axis_segments.append(stats_i.get("_minor_axis_segments"))
+        svba_boundaries.append((stats_i.get("_svba_v_boundary"), stats_i.get("_svba_a_boundary")))
         if cleaned_masks is not None:
             cleaned_masks.append(cleaned_labels)
 
@@ -1806,6 +1875,18 @@ def compute_segmentation_statistics(
                 color=(0, 0, 255),
                 thickness=2,
             )
+
+    for i, (vb, ab) in enumerate(svba_boundaries):
+        points = body_axis_svba_points(vb, ab, body_tilt_deg)
+        distance = np.nan if points is None else float(np.linalg.norm(points[0] - points[1]))
+        seg_stats[i]["SVBA_Distance_BodyAxis"] = distance * len_per_px
+        seg_stats[i]["SVBA_BodyTilt_deg"] = body_tilt_deg
+        if points is not None:
+            vt = (int(round(points[0][0])), int(round(points[0][1])))
+            ab_pt = (int(round(points[1][0])), int(round(points[1][1])))
+            cv2.line(fs_frames_bgr[i], vt, ab_pt, color=(0, 0, 255), thickness=3)
+            cv2.circle(fs_frames_bgr[i], vt, radius=7, color=(0, 0, 255), thickness=1)
+            cv2.circle(fs_frames_bgr[i], ab_pt, radius=7, color=(0, 255, 255), thickness=1)
 
     # ---- Write one segmentation workbook per group/experiment ----
     seg_stats_df = pd.DataFrame(seg_stats)
@@ -3124,14 +3205,15 @@ def combine_results(video_name: str,
 
     # ----------------------------
     # 4) Geometry means from named seg_df columns:
-    #        'VentricleAtriumDistance', 'VentricleAtriumYDistance'
+    #        'VentricleAtriumDistance', 'SVBA_Distance_BodyAxis'
     #    VA Center/Bottom/Top: use named columns directly (means, omit NaNs).
     # ----------------------------
     def mean_col(name):  # safe mean
         return nanmean(valid_series(seg_df, name)) if name in seg_df.columns else np.nan
 
     SVBA_XY = mean_col("VentricleAtriumDistance")
-    SVBA_Y  = mean_col("VentricleAtriumYDistance")
+    SVBA_BODY = mean_col("SVBA_Distance_BodyAxis")
+    SVBA_TILT = mean_col("SVBA_BodyTilt_deg")
 
     VA_Dist_C = mean_col("VA_Distance_Center")
     VA_Angle_C = _circular_mean_deg(valid_series(seg_df, "VA_Angle_Center"))
@@ -3216,7 +3298,7 @@ def combine_results(video_name: str,
         'heartrate_ventricle', 'heartrate_atrium',
         'End-diastolic', 'End-systolic', 'Differ-Ventricle',
         'SD of End-diastolic', 'SD of End-systolic',
-        'SV-BA distance (X,Y)', 'SV-BA distance (Y)',
+        'SV-BA distance (X,Y)', 'SV-BA distance (body axis)',
         'V-A Angle (Center)', 'V-A distance (Center)',
         'V-A Angle (Bottom)', 'V-A distance (Bottom)',
         'V-A Angle (Top)', 'V-A distance (Top)',
@@ -3233,7 +3315,7 @@ def combine_results(video_name: str,
         heartrate_v, heartrate_a,
         ED_mean, ES_mean, Difv,
         ED_sd, ES_sd,
-        SVBA_XY, SVBA_Y,
+        SVBA_XY, SVBA_BODY,
         VA_Angle_C, VA_Dist_C,
         VA_Angle_B, VA_Dist_B,
         VA_Angle_T, VA_Dist_T,
@@ -3276,7 +3358,8 @@ def combine_results(video_name: str,
     combined_df["ContractilitySpeed"] = contractility_speed
     combined_df["RelaxationSpeed"] = relaxation_speed
     combined_df["SVBA_Distance_mean"] = SVBA_XY
-    combined_df["SVBA_Distance_Y_mean"] = SVBA_Y
+    combined_df["SVBA_Distance_BodyAxis_mean"] = SVBA_BODY
+    combined_df["SVBA_BodyTilt_deg"] = SVBA_TILT
     combined_df["A_ED_mean"] = A_ED_mean
     combined_df["A_ES_mean"] = A_ES_mean
     combined_df["A_ED_SD"] = A_ED_sd

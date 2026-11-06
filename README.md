@@ -96,7 +96,8 @@ starting from a fresh machine. If you are using macOS or Linux, use
 Terminal instead of Anaconda Prompt and replace Windows commands such as
 `dir` and `where` with the equivalents for your platform.
 
-The demo dataset and pretrained model files can be found at https://doi.org/10.6084/m9.figshare.32109697.
+The demo dataset can be found at https://doi.org/10.6084/m9.figshare.32109697.
+For batch analysis, use the ONNX model provided with the paper.
 
 1. Install Git.
 
@@ -210,7 +211,7 @@ should print a Python 3.12 version.
 8. Install napari:
 
 ```bat
-pip install "napari[all]"
+pip install "napari[all]==0.7.0"
 ```
 
 Verification:
@@ -404,10 +405,11 @@ segmentation root. That inner folder contains the `Series###` sample
 folders directly, but PRIZM expects the root directory to contain one or
 more condition folders, each of which contains sample folders.
 
-The demo model used for validation is:
+Select the ONNX model provided with the paper. Replace the example path below
+with the path to your downloaded model:
 
 ```text
-/path/to/figshare_dataset/Trained_model/PRIZM-DeepLab_2026-04-21-10-55.onnx.ortfixed.onnx
+/path/to/model.onnx
 ```
 
 Run the demo from an activated `prizm-env` environment:
@@ -416,7 +418,7 @@ Run the demo from an activated `prizm-env` environment:
 prizm-batch-segmentation \
   --data-dir "/path/to/figshare_dataset/Representative image dataset" \
   --output-dir /path/to/prizm_demo_output \
-  --model "/path/to/figshare_dataset/Trained_model/PRIZM-DeepLab_2026-04-21-10-55.onnx.ortfixed.onnx" \
+  --model "/path/to/model.onnx" \
   --model-type onnx \
   --input-channels 3 \
   --postprocess-masks \
@@ -444,9 +446,20 @@ Expected demo output:
   `Representative image dataset/results`
 - one top-level `batch_combined_*.csv` file
 
-On a computer with an NVIDIA GeForce RTX
-3080 GPU, this command processed 14 series with 589 frames each in around 20 minutes. The resulting
-`batch_combined_*.csv` contained one row per series.
+PRIZM estimates one head angle per recording from the first 20 preprocessed
+frames (or all frames for shorter recordings). Angles are in degrees, with
+image up at 0° and clockwise rotation positive, in the range [−180°, 180°).
+The angle sets the ventricular major-axis search window and the top/bottom
+landmarks used for SV–BA and V–A measurements.
+
+`SVBA_Distance_BodyAxis` is the Euclidean distance between the ventricular
+top and atrial bottom selected along the body axis. It uses the same physical
+length units as the other distance measurements. The per-recording mean is
+`SVBA_Distance_BodyAxis_mean`. `SVBA_Distance` retains the image-axis (X,Y)
+measurement. The `VA_Angle_*_raw` columns use the head direction as their
+angular reference; `VA_Angle_*` remains relative to the ventricular major
+axis. `SVBA_BodyTilt_deg` records the head angle and is excluded from cardiac
+feature analyses.
 
 The generated `PerFishMetrics_*.xlsx` workbook can also be used to verify
 the MiniPanel CLI:
@@ -501,9 +514,8 @@ Basic workflow:
      sample and condition folder for the matching XML metadata.
 4. Set `Output Directory`. PRIZM creates the condition, sample, and results
    subfolders inside it without modifying the input data.
-5. Click `Browse Model...` and choose the `.onnx` or `.pth` segmentation
-   model. The file extension selects the matching `Model Type`
-   automatically.
+5. Click `Browse Model...` and choose the ONNX model provided with the paper.
+   The file extension selects `onnx` as the `Model Type` automatically.
 6. Set the image input:
 
    - `Select Channel` uses `Channel to segment`; the default `1` is the green
@@ -513,9 +525,8 @@ Basic workflow:
 7. Confirm the model settings. For an ONNX model, the exported graph already
    fixes `Backbone`, `Encoder Depth`, `Decoder Channels`, `Encoder Output
    Stride`, and `Atrous Rates`, so those fields are disabled. `Model Input
-   Channels` is detected from the ONNX graph when possible; the figshare
-   demo model uses `3`. The architecture fields are editable for `.pth`
-   checkpoints and must match how that checkpoint was trained.
+   Channels` is detected from the ONNX graph when possible; the model provided with the paper
+   uses `3`.
 8. Leave `Inference Batch Size` at `1` unless you have tested a larger value
    with the available GPU memory.
 9. Choose `Visualization Format`. `jpg` is the space-saving default; `tif`
@@ -647,21 +658,18 @@ prizm-batch-segmentation \
 
 Common options:
 
-- `--model-type {auto,onnx,pth}`
+- `--model-type {auto,onnx}`
 - `--channel <int>`
 - `--grayscale`
 - `--postprocess-masks`: postprocess inference masks before saving and
   analysis; unlike the GUI, CLI postprocessing is off unless this flag is
   supplied
-- `--backbone`, `--encoder-depth`, `--decoder-channels`,
-  `--encoder-output-stride`, and `--atrous-rates`: `.pth` architecture
-  settings
 - `--metadata-mode {xml,manual}`
 - `--metadata-file <path>`
 - `--resize-scale <float>`
 - `--frame-interval <float>`
 - `--infer-batch-size <int>`: default `1`
-- `--input-channels <int>`: use `3` for the figshare ONNX demo model
+- `--input-channels <int>`: use `3` for the ONNX model provided with the paper
 - `--visualization-format {jpg,tif}`: default `jpg`; label stacks remain TIFF
 - `--no-amp`
 

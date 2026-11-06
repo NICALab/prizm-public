@@ -75,7 +75,7 @@ EXTENDED_METRICS: Tuple[str, ...] = (
     "A_ED_SD",
     "A_ES_SD",
     "A_ED_ES_Diff_mean",
-    "SVBA_Distance_Y_mean",
+    "SVBA_Distance_BodyAxis_mean",
     "VA_Dist_Bottom_mean",
     "VA_Dist_Top_mean",
     "VA_Ang_Center_raw_mean",
@@ -1168,7 +1168,7 @@ def run_minipanel_analysis(
     n_g = len(files)
 
     if exclude_cols_exact is None:
-        exclude_cols_exact = ("FileKey", "ID", "FishID")
+        exclude_cols_exact = ("FileKey", "ID", "FishID", "SVBA_BodyTilt_deg")
     if exclude_cols_contains is None:
         # Functional selection is governed by the explicit core/extended contract.
         # A generic ``id`` substring rule is unsafe (for example, it matches

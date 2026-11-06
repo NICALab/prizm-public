@@ -97,17 +97,9 @@ Examples:
     --data-dir /path/to/data \\
     --output-dir /path/to/output \\
     --model /path/to/model.onnx \\
-    --model-type onnx
-  
-  prizm-batch-segmentation \\
-    --data-dir /path/to/data \\
-    --output-dir /path/to/output \\
-    --model /path/to/model.pth \\
-    --model-type pth \\
-    --channel 1 \\
-    --backbone resnet50 \\
-    --encoder-depth 5 \\
-    --decoder-channels 256
+    --model-type onnx \\
+    --input-channels 3
+
         """
     )
     
@@ -129,13 +121,13 @@ Examples:
         '--model',
         type=str,
         required=True,
-        help='Path to segmentation model file (.pth PyTorch checkpoint or .onnx exported model)'
+        help='Path to the PRIZM-DeepLab ONNX model with the head_vec output'
     )
 
     parser.add_argument(
         '--model-type',
         type=str,
-        choices=['auto', 'onnx', 'pth'],
+        choices=['auto', 'onnx'],
         default='onnx',
         help='Model backend to use (default: onnx)'
     )
