@@ -875,6 +875,15 @@ def compute_segmentation_stats(
         major_rel = wrap360(raw_clock - maj_clock)
         return dist, major_rel, wrap360(raw_clock - body_tilt)
 
+    def va_distances_matched(v_center, v_top, v_bottom, a_center, a_top, a_bottom):
+        def _d(p, q):
+            p = np.asarray(p, dtype=float)
+            q = np.asarray(q, dtype=float)
+            if not (np.all(np.isfinite(p)) and np.all(np.isfinite(q))):
+                return np.nan
+            return float(np.linalg.norm(q - p) * len_per_px)
+        return {"Center": _d(v_center, a_center), "Top": _d(v_top, a_top), "Bottom": _d(v_bottom, a_bottom)}
+
     def keep_seed_connected_component(mask_bool, seed_mask_bool):
         m = np.asarray(mask_bool, dtype=bool)
         seed = np.asarray(seed_mask_bool, dtype=bool)
@@ -1129,9 +1138,10 @@ def compute_segmentation_stats(
                     float(stats["AtriumCentroid"][0]),
                     float(stats["AtriumCentroid"][1]),
                 )
+                va_d = va_distances_matched((cx, cy), top_v, bot_v, a_center, a_top, a_bottom)
                 for tag, a_pt in (("Center", a_center), ("Bottom", a_bottom), ("Top", a_top)):
-                    d_va, a_rel, a_raw = va_metrics_from_vbottom(bot_v, top_v, a_pt)
-                    stats[f"VA_Distance_{tag}"] = float(d_va)
+                    _, a_rel, a_raw = va_metrics_from_vbottom(bot_v, top_v, a_pt)
+                    stats[f"VA_Distance_{tag}"] = float(va_d[tag])
                     stats[f"VA_Angle_{tag}"] = float(a_rel)
                     stats[f"Angle_{tag}"] = float(a_raw)
 
@@ -1220,9 +1230,10 @@ def compute_segmentation_stats(
                     float(stats["AtriumCentroid"][0]),
                     float(stats["AtriumCentroid"][1]),
                 )
+                va_d = va_distances_matched((cx, cy), top_v, bot_v, a_center, a_top, a_bottom)
                 for tag, a_pt in (("Center", a_center), ("Bottom", a_bottom), ("Top", a_top)):
-                    d_va, a_rel, a_raw = va_metrics_from_vbottom(bot_v, top_v, a_pt)
-                    stats[f"VA_Distance_{tag}"] = float(d_va)
+                    _, a_rel, a_raw = va_metrics_from_vbottom(bot_v, top_v, a_pt)
+                    stats[f"VA_Distance_{tag}"] = float(va_d[tag])
                     stats[f"VA_Angle_{tag}"] = float(a_rel)
                     stats[f"Angle_{tag}"] = float(a_raw)
 

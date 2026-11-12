@@ -461,6 +461,11 @@ angular reference; `VA_Angle_*` remains relative to the ventricular major
 axis. `SVBA_BodyTilt_deg` records the head angle and is excluded from cardiac
 feature analyses.
 
+`VA_Distance_Center`, `VA_Distance_Top`, and `VA_Distance_Bottom` measure
+the distances between the corresponding ventricular and atrial centroids,
+top points, and bottom points. V–A angles use the ventricular bottom as
+their vertex.
+
 The generated `PerFishMetrics_*.xlsx` workbook can also be used to verify
 the MiniPanel CLI:
 
